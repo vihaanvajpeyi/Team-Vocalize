@@ -1,0 +1,95 @@
+import serial
+import time
+import joblib
+import numpy as np
+import sys
+
+# --- CONFIG ---
+SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'   # Change if needed
+BAUD_RATE = 115200
+MODEL_PATH = 'emg_classifier.pkl'             # Trained model filename
+LABELS = ['base', 'hi', 'bye']           # Class labels in training order
+
+# --- LOAD TRAINED MODEL ---
+print("Loading trained model...")
+try:
+    model = joblib.load(MODEL_PATH)
+    print("✅ Model loaded successfully.")
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    sys.exit(1)
+
+# --- CONNECT TO SERIAL ---
+print(f"Connecting to {SERIAL_PORT}...")
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    ser.flushInput()
+    print(f"✅ Connected to {SERIAL_PORT} at {BAUD_RATE} baud.\n")
+except Exception as e:
+    print(f"❌ Error connecting to serial port: {e}")
+    sys.exit(1)
+
+print("--- LIVE EMG CLASSIFICATION ---")
+print("Press Ctrl+C to stop.\n")
+
+# --- TEST DATA RECEPTION ---
+print("⏳ Checking data stream...")
+start_time = time.time()
+lines_received = 0
+
+while time.time() - start_time < 5:
+    if ser.in_waiting:
+        line = ser.readline().decode(errors='ignore').strip()
+        if line:
+            print("Raw line:", line)
+            lines_received += 1
+    time.sleep(0.01)
+
+if lines_received == 0:
+    print("⚠️ No serial data received. Check Arduino or port name.")
+    ser.close()
+    sys.exit(1)
+
+print("\n✅ Serial data detected. Starting classification...\n")
+
+# --- LIVE CLASSIFICATION LOOP ---
+try:
+    while True:
+        line = ser.readline().decode(errors='ignore').strip()
+        if not line:
+            continue
+
+        try:
+            values = [float(x) for x in line.split(',')]
+            if len(values) != 6:
+                continue
+
+            # Feature vector (ignore rawADC)
+            X = np.array(values[:-1]).reshape(1, -1)
+
+            # Predict class
+            pred = model.predict(X)[0]
+
+            # Map prediction to label
+            if pred == 'base':
+                symbol = '-'
+            elif pred == 'hi':
+                symbol = 'HI'
+            elif pred == 'bye':
+                symbol = 'BYE'
+            else:
+                symbol = '?'
+
+            print(symbol)
+            time.sleep(0.02)
+
+        except ValueError:
+            continue
+
+except KeyboardInterrupt:
+    print("\n🛑 Stopped by user.")
+
+finally:
+    ser.close()
+    print("Serial connection closed.")
