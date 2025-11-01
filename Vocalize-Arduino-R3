@@ -1,0 +1,222 @@
+#define EMG_PIN 32                 // ADC pin connected to EMG SIG
+#define ADC_BITS 12                // 12-bit ADC => 0..4095
+#define ADC_MAX 4095.0
+#define VREF 3.3                   // ADC reference voltage (ESP32)
+
+//// Sampling parameters
+#define SAMPLE_RATE_HZ 500
+#define SAMPLE_INTERVAL_US (1000000UL / SAMPLE_RATE_HZ)
+
+//// Window / overlap (tweakable)
+#define WINDOW_SIZE 100            // number of samples per feature window (~0.2s at 500Hz)
+#define OVERLAP_SIZE 50            // how many samples to keep between windows
+
+//// Calibration
+#define BASELINE_SAMPLES 800       // #samples to average for baseline (relax while calibrating)
+
+//// Software gain & filtering
+#define SOFTWARE_GAIN 8.0f         // EXPERIMENT WITH THIS --> Increase as per convenience
+#define DC_ALPHA 0.995f            // slow IIR to track DC; centered = raw - dcEstimate
+
+//// ZC / SSC thresholds (in ADC units after centering and gain)
+#define ZC_DELTA_THRESHOLD 20.0f   // minimum amplitude difference to count a zero crossing (tweak)
+#define SSC_DELTA_THRESHOLD 20.0f  // minimum slope magnitude to count SSC (tweak)
+
+//// Globals
+volatile unsigned long lastSampleMicros = 0;
+float windowBuffer[WINDOW_SIZE + OVERLAP_SIZE]; // circular-ish buffer; we slide manually
+int bufIndex = 0;
+bool bufferReady = false;
+
+float dcEstimate = 0.0f;
+float baseline = 0.0f;
+bool calibrated = false;
+
+unsigned long featuresComputed = 0;
+
+//// Prototypes
+void calibrateBaseline();
+void initADC();
+void addSample(float val);
+void slideWindow();
+void computeAndPrintFeatures();
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("===== sEMG Feature Extraction (Rebuilt) =====");
+
+  // ADC init
+  initADC();
+
+  // Calibrate baseline (user must stay relaxed)
+  calibrateBaseline();
+
+  // init buffer
+  for (int i = 0; i < WINDOW_SIZE + OVERLAP_SIZE; ++i) windowBuffer[i] = 0.0f;
+  bufIndex = 0;
+
+  lastSampleMicros = micros();
+  Serial.println("timestamp_ms,MAV,RMS,ZC,SSC,WL,rawPeak");
+}
+
+void loop() {
+  // Non-blocking sampling at SAMPLE_RATE_HZ
+  unsigned long now = micros();
+  if ((now - lastSampleMicros) >= SAMPLE_INTERVAL_US) {
+    // read raw ADC
+    int raw = analogRead(EMG_PIN); // 0..4095
+    // update DC estimate (slow IIR) on raw ADC
+    dcEstimate = DC_ALPHA * dcEstimate + (1.0f - DC_ALPHA) * (float)raw;
+
+    // centered & amplified value (float)
+    float centered = ((float)raw - baseline) - (dcEstimate - baseline); // remove drifting DC
+    float amplified = centered * SOFTWARE_GAIN; // software gain to make small facial EMG visible
+
+    addSample(amplified); // store sample for windowed processing
+
+    lastSampleMicros += SAMPLE_INTERVAL_US;
+  }
+
+  // When buffer indicates ready (we set it in addSample), compute features
+  if (bufferReady) {
+    computeAndPrintFeatures();
+    bufferReady = false;
+    featuresComputed++;
+    slideWindow(); // keep overlap
+  }
+
+  // (other non-blocking tasks could go here)
+}
+
+/* -----------------------------
+   Initializes ADC for ESP32
+   ----------------------------- */
+void initADC() {
+  analogReadResolution(ADC_BITS);                  // 12-bit
+  // set pin attenuation for full 0-3.3V range
+  // Note: some cores use analogSetPinAttenuation(pin, ADC_11db)
+  // other older cores use analogSetAttenuation(ADC_11db);
+  // We'll call analogSetPinAttenuation if available.
+  #if defined(ARDUINO_ARCH_ESP32)
+    analogSetPinAttenuation(EMG_PIN, ADC_11db);
+  #endif
+  delay(10);
+}
+
+/* -----------------------------
+   Baseline calibration
+   - User should stay relaxed while this runs
+   ----------------------------- */
+void calibrateBaseline() {
+  Serial.println("Calibrating baseline. Please remain relaxed and still...");
+  unsigned long start = millis();
+  unsigned long sum = 0;
+  for (int i = 0; i < BASELINE_SAMPLES; ++i) {
+    sum += analogRead(EMG_PIN);
+    delay(2); // small delay to avoid hammering (matches ~500Hz-ish)
+  }
+  baseline = (float)sum / (float)BASELINE_SAMPLES;
+  dcEstimate = baseline; // initialize dc estimate
+  calibrated = true;
+  Serial.print("Baseline calibrated: ");
+  Serial.print(baseline, 2);
+  Serial.print("  (took ");
+  Serial.print(millis() - start);
+  Serial.println(" ms)");
+}
+
+/* -----------------------------
+   Add a sample into the buffer
+   Once we reach WINDOW_SIZE, set bufferReady true
+   ----------------------------- */
+void addSample(float sample) {
+  if (bufIndex < WINDOW_SIZE) {
+    windowBuffer[bufIndex++] = sample;
+    if (bufIndex >= WINDOW_SIZE) {
+      bufferReady = true;
+    }
+  } else {
+    // shouldn't normally get here because we slide window after computing
+    // but guard to avoid overflow
+    bufferReady = true;
+  }
+}
+
+/* -----------------------------
+   Slide the window preserving OVERLAP_SIZE samples
+   Move last OVERLAP_SIZE of current window to front
+   Reset bufIndex to OVERLAP_SIZE so new samples fill after overlap
+   ----------------------------- */
+void slideWindow() {
+  // copy last OVERLAP_SIZE samples into front
+  for (int i = 0; i < OVERLAP_SIZE; ++i) {
+    windowBuffer[i] = windowBuffer[WINDOW_SIZE - OVERLAP_SIZE + i];
+  }
+  // reset index to fill after overlap
+  bufIndex = OVERLAP_SIZE;
+}
+
+/* -----------------------------
+   Compute features on current WINDOW_SIZE portion of windowBuffer
+   and print CSV line
+   CSV: timestamp_ms,MAV,RMS,ZC,SSC,WL,rawPeak
+   ----------------------------- */
+void computeAndPrintFeatures() {
+  // compute MAV, RMS, ZC, SSC, WL
+  double sumAbs = 0.0;
+  double sumSq = 0.0;
+  double wl = 0.0;
+  int zc = 0;
+  int ssc = 0;
+
+  float prev = windowBuffer[0];
+  float prevDiff = 0.0f;
+  float peak = fabs(prev);
+
+  for (int i = 0; i < WINDOW_SIZE; ++i) {
+    float v = windowBuffer[i];
+    float absV = fabs(v);
+    sumAbs += absV;
+    sumSq += (double)v * (double)v;
+    if (absV > peak) peak = absV;
+
+    if (i > 0) {
+      float prevV = windowBuffer[i - 1];
+      float diff = v - prevV;
+      wl += fabs(diff);
+
+      // Zero crossing: sign change and amplitude threshold
+      if ((v * prevV) < 0.0f && fabs(v - prevV) >= ZC_DELTA_THRESHOLD) {
+        zc++;
+      }
+
+      // Slope sign changes: check direction change with magnitude threshold
+      if ((diff * prevDiff) < 0.0f && (fabs(diff) >= SSC_DELTA_THRESHOLD || fabs(prevDiff) >= SSC_DELTA_THRESHOLD)) {
+        ssc++;
+      }
+      prevDiff = diff;
+    }
+  }
+
+  float MAV = (float)(sumAbs / (double)WINDOW_SIZE);
+  float RMS = (float)sqrt(sumSq / (double)WINDOW_SIZE);
+
+  unsigned long ts = millis();
+
+  // Print CSV
+  // timestamp_ms,MAV,RMS,ZC,SSC,WL,rawPeak
+  Serial.print(ts);
+  Serial.print(",");
+  Serial.print(MAV, 4);
+  Serial.print(",");
+  Serial.print(RMS, 4);
+  Serial.print(",");
+  Serial.print(zc);
+  Serial.print(",");
+  Serial.print(ssc);
+  Serial.print(",");
+  Serial.print(wl, 4);
+  Serial.print(",");
+  Serial.println(peak, 4);
+}
