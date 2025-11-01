@@ -1,0 +1,166 @@
+import serial
+import csv
+import time
+from pynput import keyboard
+import sys
+import os
+import subprocess
+
+# ==============================
+# CONFIGURATION
+# ==============================
+SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'  # Change this!
+BAUD_RATE = 115200
+
+CSV_FILES = {
+    'base': 'basedata.csv',
+    'hi': 'hidata.csv',
+    'bye': 'byedata.csv'
+}
+
+HEADER = ['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']
+
+# ==============================
+# SERIAL CONNECTION
+# ==============================
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    ser.flushInput()
+    print(f"✅ Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+except Exception as e:
+    print(f"❌ Error connecting to serial port: {e}")
+    sys.exit(1)
+
+# ==============================
+# CSV SETUP
+# ==============================
+csv_writers = {}
+csv_files = {}
+for key, filename in CSV_FILES.items():
+    f = open(filename, 'a', newline='')
+    writer = csv.writer(f)
+    if f.tell() == 0:
+        writer.writerow(HEADER)
+    csv_files[key] = f
+    csv_writers[key] = writer
+
+print("\n--- EMG FEATURE LOGGER ---")
+print("Hold SPACE → record BASE (reference)")
+print("Hold 'H' → record HI gesture")
+print("Hold 'B' → record BYE gesture")
+print("Press 'Q' → quit and save all data\n")
+
+recording = {'base': False, 'hi': False, 'bye': False}
+running = True
+
+
+# ==============================
+# READ SERIAL DATA
+# ==============================
+def read_data():
+    line = ser.readline().decode(errors='ignore').strip()
+    if not line:
+        return None
+
+    # Try to split into floats/ints
+    parts = line.split(',')
+    if len(parts) < 6:
+        return None  # Not enough values
+
+    try:
+        # Handle if timestamp exists
+        if len(parts) == 7:
+            parts = parts[1:]  # remove timestamp
+
+        data = [float(x) for x in parts]
+        return data
+    except ValueError:
+        return None
+
+
+# ==============================
+# KEYBOARD HANDLERS
+# ==============================
+def on_press(key):
+    global running
+    try:
+        if key == keyboard.Key.space:
+            recording['base'] = True
+            print("🎙️ Recording BASE...")
+
+        elif key.char == 'h':
+            recording['hi'] = True
+            print("🎙️ Recording HI...")
+
+        elif key.char == 'b':
+            recording['bye'] = True
+            print("🎙️ Recording BYE...")
+
+        elif key.char == 'q':
+            print("🛑 Quitting...")
+            running = False
+            return False
+    except AttributeError:
+        pass
+
+
+def on_release(key):
+    try:
+        if key == keyboard.Key.space:
+            recording['base'] = False
+            print("✅ Stopped BASE recording.")
+
+        elif key.char == 'h':
+            recording['hi'] = False
+            print("✅ Stopped HI recording.")
+
+        elif key.char == 'b':
+            recording['bye'] = False
+            print("✅ Stopped BYE recording.")
+    except AttributeError:
+        pass
+
+
+# ==============================
+# MAIN LOOP
+# ==============================
+listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+listener.start()
+
+try:
+    while running:
+        data = read_data()
+        if data:
+            for label, active in recording.items():
+                if active:
+                    csv_writers[label].writerow(data)
+                    csv_files[label].flush()
+                    break
+        time.sleep(0.001)
+
+except KeyboardInterrupt:
+    print("\n⛔ Interrupted by user.")
+
+finally:
+    ser.close()
+    for label, f in csv_files.items():
+        f.close()
+        abs_path = os.path.abspath(f.name)
+        print(f"💾 {label.upper()} data saved at: {abs_path}")
+    listener.stop()
+    print("\n✅ Serial closed. All CSV files saved successfully.")
+
+    # AUTO OPEN FILES
+    print("\n📂 Opening CSV files...")
+    for filename in CSV_FILES.values():
+        abs_path = os.path.abspath(filename)
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(abs_path)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', abs_path])
+            else:
+                subprocess.run(['xdg-open', abs_path])
+        except Exception as e:
+            print(f"⚠️ Could not open {filename}: {e}")
