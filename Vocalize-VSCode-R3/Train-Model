@@ -1,0 +1,53 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
+import joblib
+
+# --- Load CSVs ---
+print("Loading data...")
+base = pd.read_csv('basedata.csv')
+hi = pd.read_csv('hidata.csv')
+bye = pd.read_csv('byedata.csv')
+
+# --- Label data ---
+base['label'] = 'base'
+hi['label'] = 'hi'
+bye['label'] = 'bye'
+
+# --- Combine ---
+df = pd.concat([base, hi, bye], ignore_index=True)
+print(f"Total samples: {len(df)}")
+
+# --- Features and labels ---
+X = df[['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']]
+y = df['label']
+
+# --- Manual split to avoid leakage ---
+# Let's simulate by splitting by class, not by random rows
+train_base, test_base = train_test_split(base, test_size=0.2, random_state=42, shuffle=False)
+train_hi, test_hi = train_test_split(hi, test_size=0.2, random_state=42, shuffle=False)
+train_bye, test_bye = train_test_split(bye, test_size=0.2, random_state=42, shuffle=False)
+
+train_df = pd.concat([train_base, train_hi, train_bye])
+test_df  = pd.concat([test_base, test_hi, test_bye])
+
+X_train = train_df[['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']]
+y_train = train_df['label']
+X_test = test_df[['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']]
+y_test = test_df['label']
+
+# --- Train model ---
+print("Training Random Forest model...")
+model = RandomForestClassifier(n_estimators=200, random_state=42)
+model.fit(X_train, y_train)
+
+# --- Evaluate ---
+y_pred = model.predict(X_test)
+print("\n--- Evaluation ---")
+print(classification_report(y_test, y_pred))
+print(f"Accuracy: {accuracy_score(y_test, y_pred):.3f}")
+
+# --- Save model ---
+joblib.dump(model, 'emg_classifier.pkl')
+print("\n✅ Model saved as emg_classifier.pkl")
