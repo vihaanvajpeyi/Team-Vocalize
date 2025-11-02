@@ -1,0 +1,42 @@
+import serial
+import time
+
+# --- Serial setup ---
+PORT = '/dev/cu.SLAB_USBtoUART'   # change if needed
+BAUD = 115200
+
+print(f"🔌 Connecting to {PORT}...")
+ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(2)
+print("✅ Connected!\n")
+
+print("📡 Reading live data (press Ctrl+C to stop)...\n")
+
+try:
+    while True:
+        line = ser.readline().decode('utf-8').strip()
+        if not line:
+            continue
+        
+        # Expect CSV-like input: MAV,RMS,ZC,SSC,WL,rawPeak
+        try:
+            parts = line.split(',')
+            rawPeak = float(parts[-1])
+            
+            
+            if rawPeak < 1500:
+                label = "-"
+            elif 1000 <= rawPeak < 7000:
+                label = "BYE"
+            else:
+                label = "HI"
+            
+            print(label)
+        
+        except Exception as e:
+            print("⚠️ Parse error:", e)
+
+except KeyboardInterrupt:
+    print("\n🛑 Stopped.")
+finally:
+    ser.close()
