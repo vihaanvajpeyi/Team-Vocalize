@@ -2,19 +2,21 @@ import serial
 import time
 import joblib
 import numpy as np
+import pandas as pd
 import sys
 
 # --- CONFIG ---
-SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'   # Change if needed
+SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'
 BAUD_RATE = 115200
-MODEL_PATH = 'emg_classifier.pkl'             # Trained model filename
-LABELS = ['base', 'hi', 'bye']           # Class labels in training order
+MODEL_PATH = 'emg_classifier.pkl'
+LABELS = ['base', 'hi', 'bye']
+FEATURE_NAMES = ['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']
 
-# --- LOAD TRAINED MODEL ---
+# --- LOAD MODEL ---
 print("Loading trained model...")
 try:
     model = joblib.load(MODEL_PATH)
-    print("✅ Model loaded successfully.")
+    print("✅ Model loaded successfully.\n")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
     sys.exit(1)
@@ -22,9 +24,9 @@ except Exception as e:
 # --- CONNECT TO SERIAL ---
 print(f"Connecting to {SERIAL_PORT}...")
 try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    time.sleep(2)
-    ser.flushInput()
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
+    time.sleep(3)
+    ser.reset_input_buffer()
     print(f"✅ Connected to {SERIAL_PORT} at {BAUD_RATE} baud.\n")
 except Exception as e:
     print(f"❌ Error connecting to serial port: {e}")
@@ -33,27 +35,27 @@ except Exception as e:
 print("--- LIVE EMG CLASSIFICATION ---")
 print("Press Ctrl+C to stop.\n")
 
-# --- TEST DATA RECEPTION ---
-print("⏳ Checking data stream...")
-start_time = time.time()
+# --- VERIFY DATA STREAM ---
+print("⏳ Checking serial stream (5 seconds)...")
+start = time.time()
 lines_received = 0
 
-while time.time() - start_time < 5:
-    if ser.in_waiting:
-        line = ser.readline().decode(errors='ignore').strip()
-        if line:
-            print("Raw line:", line)
-            lines_received += 1
-    time.sleep(0.01)
+while time.time() - start < 5:
+    if ser.in_waiting > 0:
+        try:
+            line = ser.readline().decode(errors='ignore').strip()
+            if line:
+                print("Raw:", line)
+                lines_received += 1
+        except Exception as e:
+            print(f"⚠️ Serial read error: {e}")
+    time.sleep(0.02)
 
-if lines_received == 0:
-    print("⚠️ No serial data received. Check Arduino or port name.")
-    ser.close()
-    sys.exit(1)
 
-print("\n✅ Serial data detected. Starting classification...\n")
 
-# --- LIVE CLASSIFICATION LOOP ---
+print(f"\n✅ Serial data detected ({lines_received} lines). Starting classification...\n")
+
+# --- LIVE CLASSIFICATION ---
 try:
     while True:
         line = ser.readline().decode(errors='ignore').strip()
@@ -61,31 +63,29 @@ try:
             continue
 
         try:
-            values = [float(x) for x in line.split(',')]
-            if len(values) != 6:
-                continue
+            parts = [float(x) for x in line.split(',') if x != '']
+            if len(parts) < 7:
+                continue  # skip incomplete data
 
-            # Feature vector (ignore rawADC)
-            X = np.array(values[:-1]).reshape(1, -1)
+            # Ignore timestamp / counter (first value)
+            features = parts[1:7]
 
-            # Predict class
+            # Create dataframe for model
+            X = pd.DataFrame([features], columns=FEATURE_NAMES)
+
+            # Predict
             pred = model.predict(X)[0]
 
-            # Map prediction to label
-            if pred == 'base':
-                symbol = '-'
-            elif pred == 'hi':
-                symbol = 'HI'
-            elif pred == 'bye':
-                symbol = 'BYE'
-            else:
-                symbol = '?'
-
-            print(symbol)
-            time.sleep(0.02)
+            # Symbolic output
+            symbols = {'base': '-', 'hi': 'HI', 'bye': 'BYE'}
+            print(symbols.get(pred, pred), flush=True)
 
         except ValueError:
             continue
+        except Exception as e:
+            print(f"⚠️ Runtime error: {e}")
+
+        time.sleep(0.02)
 
 except KeyboardInterrupt:
     print("\n🛑 Stopped by user.")
