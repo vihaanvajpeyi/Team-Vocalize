@@ -6,9 +6,9 @@ import joblib
 
 # --- Load CSVs ---
 print("Loading data...")
-base = pd.read_csv('basedata.csv')
-hi = pd.read_csv('hidata.csv')
-bye = pd.read_csv('byedata.csv')
+base = pd.read_csv('base-data.csv')
+hi = pd.read_csv('hi-data.csv')
+bye = pd.read_csv('bye-data.csv')
 
 # --- Label data ---
 base['label'] = 'base'
