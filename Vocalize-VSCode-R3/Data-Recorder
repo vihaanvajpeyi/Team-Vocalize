@@ -11,13 +11,12 @@ import subprocess
 # ==============================
 SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'  # Change this!
 BAUD_RATE = 115200
-
 CSV_FILES = {
-    'base': 'basedata.csv',
-    'hi': 'hidata.csv',
-    'bye': 'byedata.csv'
+    'base': 'base-data.csv',
+    'hi': 'hi-data.csv',
+    'bye': 'bye-data.csv'
 }
-
+hbq
 HEADER = ['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']
 
 # ==============================
