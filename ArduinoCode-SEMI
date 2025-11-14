@@ -1,0 +1,258 @@
+#define EMG_PIN 32 // ADC pin connected to EMG SIG
+#define ADC_BITS 12 // 12-bit ADC => 0..4095
+#define ADC_MAX 4095.0
+#define VREF 3.3 // ADC reference voltage (ESP32)
+
+//// Sampling parameters
+#define SAMPLE_RATE_HZ 500
+#define SAMPLE_INTERVAL_US (1000000UL / SAMPLE_RATE_HZ)
+
+//// Windowing
+#define WINDOW_SIZE 100 // number of samples per feature window (~0.2s at 500Hz)
+#define OVERLAP_SIZE 50 // overlap between windows
+
+//// Calibration
+#define BASELINE_SAMPLES 800 // #samples to average for baseline (relax while calibrating)
+
+//// Software gain
+#define SOFTWARE_GAIN 8.0f // digital gain applied after smoothing
+
+//// DC filter
+#define DC_ALPHA 0.995f // slow IIR to track DC
+
+//// BANDPASS FILTER CONSTANTS (designed approx 20–450 Hz, 2nd-order IIR coefficients)
+float bp_a0 = 0.7263f, bp_a1 = -1.4525f, bp_a2 = 0.7263f;
+float bp_b1 = -1.3807f, bp_b2 = 0.5528f;
+float bp_prev1 = 0.0f, bp_prev2 = 0.0f;
+float bp_out_prev1 = 0.0f, bp_out_prev2 = 0.0f;
+
+//// Enhanced RMS smoothing
+#define RMS_WINDOW 20
+float rmsBuffer[RMS_WINDOW];
+int rmsIndex = 0;
+
+//// Adaptive threshold
+float adaptiveThreshold = 0.0f;
+
+//// Globals
+volatile unsigned long lastSampleMicros = 0;
+float windowBuffer[WINDOW_SIZE + OVERLAP_SIZE];
+int bufIndex = 0;
+bool bufferReady = false;
+
+float dcEstimate = 0.0f;
+float baseline = 0.0f;
+bool calibrated = false;
+
+unsigned long featuresComputed = 0;
+
+//// Prototypes
+void calibrateBaseline();
+void initADC();
+float bandpassFilter(float x);
+float computeRMS(float x);
+void addSample(float val);
+void slideWindow();
+void computeAndPrintFeatures();
+
+void setup() {
+Serial.begin(115200);
+delay(500);
+Serial.println("===== sEMG Feature Extraction (ESP32 - No BLE) =====");
+
+initADC();
+calibrateBaseline();
+
+for (int i = 0; i < WINDOW_SIZE + OVERLAP_SIZE; ++i) windowBuffer[i] = 0.0f;
+for (int i = 0; i < RMS_WINDOW; ++i) rmsBuffer[i] = 0.0f;
+
+bufIndex = 0;
+lastSampleMicros = micros();
+
+Serial.println("timestamp_ms,MAV,RMS,ZC,SSC,WL,rawPeak");
+}
+
+void loop() {
+unsigned long now = micros();
+
+// Non-blocking sampling
+if ((now - lastSampleMicros) >= SAMPLE_INTERVAL_US) {
+int raw = analogRead(EMG_PIN); // 0..4095
+
+// DC tracking (IIR)
+dcEstimate = DC_ALPHA * dcEstimate + (1.0f - DC_ALPHA) * (float)raw;
+
+// center relative to DC (and baseline)
+float centered = ((float)raw - dcEstimate) - (baseline - dcEstimate);
+
+// bandpass 20-450 Hz (IIR)
+float bp = bandpassFilter(centered);
+
+// rectify
+float rectified = fabs(bp);
+
+// RMS smoothing
+float smoothed = computeRMS(rectified);
+
+// software gain after smoothing
+float amplified = smoothed * SOFTWARE_GAIN;
+
+// update adaptive threshold (slow)
+adaptiveThreshold = 0.99f * adaptiveThreshold + 0.01f * amplified;
+
+addSample(amplified);
+
+lastSampleMicros += SAMPLE_INTERVAL_US;
+}
+
+// when a window is ready, compute features
+if (bufferReady) {
+computeAndPrintFeatures();
+bufferReady = false;
+featuresComputed++;
+slideWindow();
+}
+
+// other non-blocking tasks can be added here
+}
+
+/* -----------------------------
+Initializes ADC for ESP32
+----------------------------- */
+void initADC() {
+analogReadResolution(ADC_BITS); // 12-bit
+#if defined(ARDUINO_ARCH_ESP32)
+analogSetPinAttenuation(EMG_PIN, ADC_11db); // full range
+#endif
+delay(10);
+}
+
+/* -----------------------------
+Baseline calibration
+- User should stay relaxed while this runs
+----------------------------- */
+void calibrateBaseline() {
+Serial.println("Calibrating baseline... Please relax and stay still.");
+unsigned long sum = 0;
+for (int i = 0; i < BASELINE_SAMPLES; ++i) {
+sum += analogRead(EMG_PIN);
+delay(2); // ~500Hz spacing
+}
+baseline = (float)sum / (float)BASELINE_SAMPLES;
+dcEstimate = baseline;
+adaptiveThreshold = 0.0f;
+calibrated = true;
+
+Serial.print("Baseline calibrated: ");
+Serial.println(baseline, 2);
+}
+
+/* -----------------------------
+Simple 2nd-order IIR bandpass (coefficients set above)
+----------------------------- */
+float bandpassFilter(float x) {
+// Direct Form I implementation (biquad-like)
+float y = bp_a0 * x + bp_a1 * bp_prev1 + bp_a2 * bp_prev2
+- bp_b1 * bp_out_prev1 - bp_b2 * bp_out_prev2;
+
+// shift history
+bp_prev2 = bp_prev1;
+bp_prev1 = x;
+
+bp_out_prev2 = bp_out_prev1;
+bp_out_prev1 = y;
+
+return y;
+}
+
+/* -----------------------------
+RMS smoothing with circular buffer
+----------------------------- */
+float computeRMS(float v) {
+rmsBuffer[rmsIndex] = v;
+rmsIndex = (rmsIndex + 1) % RMS_WINDOW;
+
+float sumSq = 0.0f;
+for (int i = 0; i < RMS_WINDOW; ++i) {
+sumSq += rmsBuffer[i] * rmsBuffer[i];
+}
+return sqrt(sumSq / (float)RMS_WINDOW);
+}
+
+/* -----------------------------
+Add a sample into the window buffer
+----------------------------- */
+void addSample(float sample) {
+if (bufIndex < WINDOW_SIZE) {
+windowBuffer[bufIndex++] = sample;
+if (bufIndex >= WINDOW_SIZE) bufferReady = true;
+} else {
+bufferReady = true;
+}
+}
+
+/* -----------------------------
+Slide window preserving overlap
+----------------------------- */
+void slideWindow() {
+for (int i = 0; i < OVERLAP_SIZE; ++i) {
+windowBuffer[i] = windowBuffer[WINDOW_SIZE - OVERLAP_SIZE + i];
+}
+bufIndex = OVERLAP_SIZE;
+}
+
+/* -----------------------------
+Compute features on current WINDOW_SIZE portion of windowBuffer
+CSV: timestamp_ms,MAV,RMS,ZC,SSC,WL,rawPeak
+----------------------------- */
+void computeAndPrintFeatures() {
+double sumAbs = 0.0;
+double sumSq = 0.0;
+double wl = 0.0;
+int zc = 0;
+int ssc = 0;
+
+float prev = windowBuffer[0];
+float prevDiff = 0.0f;
+float peak = fabs(prev);
+
+for (int i = 0; i < WINDOW_SIZE; ++i) {
+float v = windowBuffer[i];
+float absV = fabs(v);
+sumAbs += absV;
+sumSq += (double)v * (double)v;
+if (absV > peak) peak = absV;
+
+if (i > 0) {
+float prevV = windowBuffer[i - 1];
+float diff = v - prevV;
+wl += fabs(diff);
+
+// Zero crossing: sign change and amplitude relative to adaptive threshold
+if ((v * prevV) < 0.0f && fabs(diff) >= adaptiveThreshold * 0.1f) {
+zc++;
+}
+
+// Slope sign changes with scale check
+if ((diff * prevDiff) < 0.0f && fabs(diff) >= adaptiveThreshold * 0.1f) {
+ssc++;
+}
+prevDiff = diff;
+}
+}
+
+float MAV = (float)(sumAbs / (double)WINDOW_SIZE);
+float RMS = (float)sqrt(sumSq / (double)WINDOW_SIZE);
+
+unsigned long ts = millis();
+
+// Print CSV line
+Serial.print(ts); Serial.print(",");
+Serial.print(MAV, 4); Serial.print(",");
+Serial.print(RMS, 4); Serial.print(",");
+Serial.print(zc); Serial.print(",");
+Serial.print(ssc); Serial.print(",");
+Serial.print(wl, 4); Serial.print(",");
+Serial.println(peak, 4);
+}
+
