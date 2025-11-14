@@ -6,100 +6,152 @@ import sys
 import os
 import subprocess
 
-# ==============================
+
 # CONFIGURATION
-# ==============================
-SERIAL_PORT = '/dev/cu.SLAB_USBtoUART'  # Change this!
+
+SERIAL_PORT = 'COM21' # Change this if needed
 BAUD_RATE = 115200
-CSV_FILES = {
-    'base': 'base-data.csv',
-    'hi': 'hi-data.csv',
-    'bye': 'bye-data.csv'
+
+# NEW WORD LABELS
+WORDS = {
+    'reference': 'reference.csv',
+    'hi': 'hi.csv',
+    'thik': 'thik.csv',
+    'hu': 'hu.csv',
+    'haan': 'haan.csv',
+    'khana': 'khana.csv',
+    'hai': 'hai.csv',
+    'madad': 'madad.csv',
+    'chahiye': 'chahiye.csv'
 }
-hbq
+
+# Create directories
+BASE_DIR = "data"
+for label in WORDS:
+    os.makedirs(os.path.join(BASE_DIR, label), exist_ok=True)
+
 HEADER = ['MAV', 'RMS', 'ZC', 'SSC', 'WL', 'rawPeak']
 
-# ==============================
+
 # SERIAL CONNECTION
-# ==============================
+
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     time.sleep(2)
     ser.flushInput()
-    print(f"✅ Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+    print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
 except Exception as e:
-    print(f"❌ Error connecting to serial port: {e}")
+    print(f"Error connecting to serial port: {e}")
     sys.exit(1)
 
-# ==============================
-# CSV SETUP
-# ==============================
+
+# CSV FILE SETUP
+
 csv_writers = {}
 csv_files = {}
-for key, filename in CSV_FILES.items():
-    f = open(filename, 'a', newline='')
+
+for label, filename in WORDS.items():
+    filepath = os.path.join(BASE_DIR, label, filename)
+    f = open(filepath, 'a', newline='')
     writer = csv.writer(f)
+
+# Write header if new file
     if f.tell() == 0:
         writer.writerow(HEADER)
-    csv_files[key] = f
-    csv_writers[key] = writer
 
-print("\n--- EMG FEATURE LOGGER ---")
-print("Hold SPACE → record BASE (reference)")
-print("Hold 'H' → record HI gesture")
-print("Hold 'B' → record BYE gesture")
-print("Press 'Q' → quit and save all data\n")
+    csv_files[label] = f
+    csv_writers[label] = writer
 
-recording = {'base': False, 'hi': False, 'bye': False}
+print("\n--- EMG WORD LOGGER ---")
+print("Hold SPACE → record REFERENCE")
+print("Hold H → hi")
+print("Hold T → thik")
+print("Hold U → hu")
+print("Hold A → haan")
+print("Hold K → khana")
+print("Hold I → hai")
+print("Hold M → madad")
+print("Hold C → chahiye")
+print("Press Q → quit\n")
+
+active_label = None
 running = True
 
 
-# ==============================
-# READ SERIAL DATA
-# ==============================
+# READ FROM SERIAL
+
 def read_data():
     line = ser.readline().decode(errors='ignore').strip()
     if not line:
         return None
 
-    # Try to split into floats/ints
     parts = line.split(',')
-    if len(parts) < 6:
-        return None  # Not enough values
-
-    try:
-        # Handle if timestamp exists
-        if len(parts) == 7:
-            parts = parts[1:]  # remove timestamp
-
-        data = [float(x) for x in parts]
-        return data
-    except ValueError:
+    if len(parts) != 7:
         return None
 
+    try:
+    # Drop timestamp
+        parts = parts[1:]
+        return [float(x) for x in parts]
+    except:
+        return None
 
-# ==============================
-# KEYBOARD HANDLERS
-# ==============================
+def set_label(label):
+    global active_label
+    active_label = label
+    print(f"Recording {label.upper()}")
+
+def clear_label(label):
+    global active_label
+    if active_label == label:
+        active_label = None
+        print(f"Stopped {label.upper()} recording")
+
+# KEYBOARD EVENT HANDLERS
+
 def on_press(key):
     global running
+
     try:
         if key == keyboard.Key.space:
-            recording['base'] = True
-            print("🎙️ Recording BASE...")
+            set_label('reference')
+            
+        elif key.char.lower() == 'h':
+            set_label('hi')
 
-        elif key.char == 'h':
-            recording['hi'] = True
-            print("🎙️ Recording HI...")
+        elif key.char.lower() == 't':
+            set_label('thik')
+          
 
-        elif key.char == 'b':
-            recording['bye'] = True
-            print("🎙️ Recording BYE...")
+        elif key.char.lower() == 'u':
+            set_label('hu')
+           
 
-        elif key.char == 'q':
-            print("🛑 Quitting...")
+        elif key.char.lower() == 'a':
+            set_label('haan')
+           
+
+        elif key.char.lower() == 'k':
+            set_label('khana')
+            
+
+        elif key.char.lower() == 'i':
+            set_label('hai')
+          
+
+        elif key.char.lower() == 'm':
+            set_label('madad')
+            
+
+        elif key.char.lower() == 'c':
+            set_label('chahiye')
+        
+
+        elif key.char.lower() == 'q':
+            print("Quitting...")
             running = False
             return False
+
     except AttributeError:
         pass
 
@@ -107,59 +159,69 @@ def on_press(key):
 def on_release(key):
     try:
         if key == keyboard.Key.space:
-            recording['base'] = False
-            print("✅ Stopped BASE recording.")
+            clear_label('reference')
+          
 
-        elif key.char == 'h':
-            recording['hi'] = False
-            print("✅ Stopped HI recording.")
+        elif key.char.lower() == 'h':
+            clear_label('hi')
+          
 
-        elif key.char == 'b':
-            recording['bye'] = False
-            print("✅ Stopped BYE recording.")
+        elif key.char.lower() == 't':
+            clear_label('thik')
+            
+
+        elif key.char.lower() == 'u':
+            clear_label('hu')
+       
+
+        elif key.char.lower() == 'a':
+            clear_label('haan')
+          
+
+        elif key.char.lower() == 'k':
+            clear_label('khana')
+            
+
+        elif key.char.lower() == 'i':
+            clear_label('hai')
+           
+
+        elif key.char.lower() == 'm':
+            clear_label('madad')
+           
+
+        elif key.char.lower() == 'c':
+            clear_label('chahiye')
+           
     except AttributeError:
         pass
 
 
-# ==============================
 # MAIN LOOP
-# ==============================
+
 listener = keyboard.Listener(on_press=on_press, on_release=on_release)
 listener.start()
 
 try:
     while running:
         data = read_data()
-        if data:
-            for label, active in recording.items():
-                if active:
-                    csv_writers[label].writerow(data)
-                    csv_files[label].flush()
-                    break
+        if data and active_label:
+            csv_writers[active_label].writerow(data)
+            csv_files[active_label].flush
+
         time.sleep(0.001)
 
 except KeyboardInterrupt:
-    print("\n⛔ Interrupted by user.")
+    print("\nInterrupted by user.")
 
 finally:
     ser.close()
+
     for label, f in csv_files.items():
         f.close()
         abs_path = os.path.abspath(f.name)
-        print(f"💾 {label.upper()} data saved at: {abs_path}")
-    listener.stop()
-    print("\n✅ Serial closed. All CSV files saved successfully.")
+        print(f"💾 Saved: {label.upper()} → {abs_path}")
 
-    # AUTO OPEN FILES
-    print("\n📂 Opening CSV files...")
-    for filename in CSV_FILES.values():
-        abs_path = os.path.abspath(filename)
-        try:
-            if sys.platform.startswith('win'):
-                os.startfile(abs_path)
-            elif sys.platform == 'darwin':
-                subprocess.run(['open', abs_path])
-            else:
-                subprocess.run(['xdg-open', abs_path])
-        except Exception as e:
-            print(f"⚠️ Could not open {filename}: {e}")
+    listener.stop()
+    print("\nSerial closed. All CSV files saved successfully.")
+
