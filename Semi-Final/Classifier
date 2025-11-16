@@ -1,0 +1,89 @@
+import serial
+import numpy as np
+import tensorflow as tf
+import joblib
+
+# -------------------------
+# LOAD MODEL + SCALER
+# -------------------------
+model = tf.keras.models.load_model("neural_model.h5")
+scaler = joblib.load("emg_scaler.pkl")
+
+print("Model input shape:", model.input_shape)
+
+# -------------------------
+# LABELS
+# -------------------------
+labels = {
+    0: "-",
+    1: "hi",
+    2: "thik",
+    3: "hu",
+    4: "haan",
+    5: "khana",
+    6: "hai",
+    7: "poha",
+    8: "upma"
+}
+
+# -------------------------
+# SERIAL PORT
+# -------------------------
+ser = serial.Serial("/dev/cu.SLAB_USBtoUART", 115200, timeout=1)
+print("Listening on /dev/cu.SLAB_USBtoUART ...")
+
+
+# -------------------------
+# PREPROCESS
+# -------------------------
+def preprocess(raw):
+    """
+    Arduino sends:
+    [timestamp, mav, rms, zc, ssc, wl, rawpeak]
+    
+    Training used:
+    [mav, rms, ssc, wl, rawpeak]
+    → remove index 0 (timestamp)
+    → remove index 2 of remaining (zc)
+    """
+
+    # Remove timestamp
+    arr = raw[1:]     # 6 features
+
+    # Remove ZC (index 2)
+    arr = np.delete(arr, 2)   # now 5 features
+
+    arr = np.array(arr, dtype=float).reshape(1, -1)
+
+    # Use SAME scaler as training
+    arr = scaler.transform(arr)
+
+    return arr
+
+
+# -------------------------
+# LIVE LOOP
+# -------------------------
+while True:
+    line = ser.readline().decode().strip()
+    if not line:
+        continue
+
+    try:
+        parts = line.split(",")
+        if len(parts) != 7:
+            print("Invalid packet:", parts)
+            continue
+
+        raw = [float(x) for x in parts]
+
+        X = preprocess(raw)
+
+        pred = model.predict(X, verbose=0)
+        label_index = int(np.argmax(pred))
+        confidence = float(np.max(pred))
+
+        print(f"PREDICTION: {labels[label_index]} | CONF: {confidence:.2f}")
+
+    except Exception as e:
+        print("Error:", e)
