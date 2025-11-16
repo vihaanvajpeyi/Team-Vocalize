@@ -1,0 +1,125 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.utils import to_categorical
+import joblib
+
+# ---------------------------
+# 1. LOAD ALL CSV FILES
+# ---------------------------
+
+DATASETS = {
+    0: "/Users/VihaanVajpeyi/data/reference/vv-reference.csv",
+    1: "/Users/VihaanVajpeyi/data/hi/vv-hi.csv",
+    2: "/Users/VihaanVajpeyi/data/thik/vv-thik.csv",
+    3: "/Users/VihaanVajpeyi/data/hu/vv-hu.csv",
+    4: "/Users/VihaanVajpeyi/data/haan/vv-haan.csv",
+    5: "/Users/VihaanVajpeyi/data/khana/vv-khana.csv",
+    6: "/Users/VihaanVajpeyi/data/hai/vv-hai.csv",
+    7: "/Users/VihaanVajpeyi/data/poha/vv-poha.csv",
+    8: "/Users/VihaanVajpeyi/data/upma/vv-upma.csv",
+}
+
+X_list = []
+y_list = []
+
+print("Loading datasets...")
+for label, file_path in DATASETS.items():
+    df = pd.read_csv(file_path).dropna()
+
+    # REMOVE ZC (3rd column, index 2)
+    df = df.drop(df.columns[2], axis=1)
+
+    X_list.append(df.values)
+    y_list.append(np.full(len(df), label))
+
+X = np.vstack(X_list)
+y = np.concatenate(y_list)
+
+print("Final shape after removing ZC:", X.shape)
+
+# ---------------------------
+# 2. SCALING
+# ---------------------------
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Save scaler
+joblib.dump(scaler, "emg_scaler.pkl")
+
+# One-hot encode labels
+y_cat = to_categorical(y, num_classes=9)
+
+# ---------------------------
+# 3. SPLIT
+# ---------------------------
+
+X_train, X_temp, y_train, y_temp = train_test_split(
+    X_scaled, y_cat, test_size=0.2, random_state=42, shuffle=True
+)
+
+X_val, X_test, y_val, y_test = train_test_split(
+    X_temp, y_temp, test_size=0.5, random_state=42
+)
+
+# ---------------------------
+# 4. BUILD MODEL
+# ---------------------------
+
+model = Sequential([
+    Dense(256, activation='relu', input_shape=(5,)),
+    BatchNormalization(),
+    Dropout(0.3),
+
+    Dense(256, activation='relu'),
+    BatchNormalization(),
+    Dropout(0.3),
+
+    Dense(128, activation='relu'),
+    BatchNormalization(),
+    Dropout(0.2),
+
+    Dense(9, activation='softmax')
+])
+
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+# ---------------------------
+# 5. TRAIN
+# ---------------------------
+
+early_stop = EarlyStopping(
+    monitor='val_accuracy',
+    patience=10,
+    restore_best_weights=True
+)
+
+model.fit(
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    epochs=50,
+    batch_size=32,
+    callbacks=[early_stop],
+    verbose=1
+)
+
+# ---------------------------
+# 6. EVALUATE + SAVE
+# ---------------------------
+
+loss, acc = model.evaluate(X_test, y_test)
+print(f"TEST ACCURACY: {acc*100:.2f}%")
+
+model.save("neural_model.h5")
+print("\nSaved: neural_model.h5 and emg_scaler.pkl")
