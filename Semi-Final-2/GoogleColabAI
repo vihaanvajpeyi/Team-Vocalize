@@ -1,0 +1,295 @@
+!pip install -q librosa==0.10.0.post2 soundfile tqdm scikit-learn tensorflow==2.19.0
+
+import os, random, zipfile
+import numpy as np
+import matplotlib.pyplot as plt
+import librosa
+import soundfile as sf
+from tqdm import tqdm
+
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+
+print("TensorFlow:", tf.__version__)
+print("Librosa:", librosa.__version__)
+
+------------------------------------------------------------------------------------------------------
+
+from google.colab import files
+print("Upload dataset.zip now (must contain dataset/<CLASS>/*.wav)")
+uploaded = files.upload()
+
+for filename in uploaded.keys():
+    if filename.endswith(".zip"):
+        with zipfile.ZipFile(filename, 'r') as z:
+            z.extractall("data")
+        print("Extracted:", filename)
+
+------------------------------------------------------------------------------------------------------
+
+DATA_ROOT = "data/dataset-e"    # change if your folder is named differently
+
+SR = 16000
+DURATION = 2.0
+TARGET_LEN = int(SR * DURATION)
+
+# Whisper-speech optimized STFT
+N_FFT = 512
+HOP = 160
+WIN = 400
+
+RMS_TARGET = 0.02   # per-file gain normalization
+
+random.seed(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Detect classes
+classes = sorted([
+    d for d in os.listdir(DATA_ROOT)
+    if os.path.isdir(os.path.join(DATA_ROOT, d)) and not d.startswith('.')
+])
+
+print("Detected classes:", classes)
+
+def list_wavs(root):
+    arr = []
+    for cl in classes:
+        folder = os.path.join(root, cl)
+        for fn in os.listdir(folder):
+            if fn.endswith(".wav") and not fn.startswith("._"):
+                arr.append((os.path.join(folder, fn), cl))
+    return arr
+
+------------------------------------------------------------------------------------------------------
+
+# --------------------------
+# Audio helpers
+# --------------------------
+
+def rms(y):
+    return np.sqrt(np.mean(y**2))
+
+def apply_gain_normalization(y, target=RMS_TARGET):
+    cur = rms(y) + 1e-8
+    return y * (target / cur)
+
+def pad_trim(y, target_len=TARGET_LEN):
+    if len(y) < target_len:
+        y = np.pad(y, (0, target_len - len(y)))
+    return y[:target_len]
+
+# --------------------------
+# Augmentation
+# --------------------------
+def augment_waveform(y, sr=SR):
+    # Time shift
+    if random.random() < 0.5:
+        shift = int(random.uniform(-0.1, 0.1) * sr)
+        y = np.roll(y, shift)
+        if shift > 0:
+            y[:shift] = 0
+        else:
+            y[shift:] = 0
+
+    # Time stretch using RESAMPLE (safe for librosa 0.10)
+    if random.random() < 0.5:
+        rate = random.uniform(0.95, 1.05)
+        # simulate time-stretch
+        stretched = librosa.resample(y, orig_sr=sr, target_sr=int(sr * rate))
+        y = pad_trim(stretched)
+
+    # Noise injection
+    if random.random() < 0.5:
+        noise = np.random.randn(len(y)) * random.uniform(0.001, 0.01)
+        y = y + noise
+
+    return y
+
+
+# --------------------------
+# ⭐ STFT LOG-POWER FEATURE
+# --------------------------
+def waveform_to_stft(y, sr=SR):
+    stft = librosa.stft(y, n_fft=N_FFT, hop_length=HOP, win_length=WIN)
+    mag = np.abs(stft)
+
+    log_stft = librosa.amplitude_to_db(mag, ref=np.max)
+
+    # Per-sample standardization
+    log_stft = (log_stft - log_stft.mean()) / (log_stft.std() + 1e-9)
+
+    return log_stft.astype(np.float32)
+
+------------------------------------------------------------------------------------------------------
+
+entries = list_wavs(DATA_ROOT)
+print("Total wav files:", len(entries))
+
+AUGS = 4
+
+X = []
+y = []
+
+for path, label in tqdm(entries):
+    wav, sr = sf.read(path)
+
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+
+    wav = pad_trim(wav)
+    wav = apply_gain_normalization(wav)
+
+    # base
+    feat = waveform_to_stft(wav)
+    X.append(feat)
+    y.append(label)
+
+    # augmented
+    for _ in range(AUGS):
+        aug = augment_waveform(wav.copy())
+        aug = apply_gain_normalization(aug)
+        feat_aug = waveform_to_stft(aug)
+        X.append(feat_aug)
+        y.append(label)
+
+X = np.array(X)
+y = np.array(y)
+
+print("Feature shape:", X.shape)
+
+------------------------------------------------------------------------------------------------------
+
+le = LabelEncoder()
+y_enc = le.fit_transform(y)
+labels = list(le.classes_)
+print("Label order:", labels)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_enc, test_size=0.2, random_state=42, stratify=y_enc
+)
+
+X_train = X_train[..., np.newaxis]
+X_test = X_test[..., np.newaxis]
+
+print("Train shape:", X_train.shape)
+print("Test shape:", X_test.shape)
+
+------------------------------------------------------------------------------------------------------
+
+input_shape = X_train.shape[1:]
+tf.keras.backend.clear_session()
+
+inp = layers.Input(shape=input_shape)
+
+x = layers.Conv2D(32, (3,3), padding='same', activation='relu')(inp)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPool2D((2,2))(x)
+
+x = layers.Conv2D(64, (3,3), padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPool2D((2,2))(x)
+
+x = layers.Conv2D(128, (3,3), padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPool2D((2,2))(x)
+
+x = layers.Permute((2,1,3))(x)
+ts = tf.keras.backend.int_shape(x)[1]
+fd = tf.keras.backend.int_shape(x)[2] * tf.keras.backend.int_shape(x)[3]
+x = layers.Reshape((ts, fd))(x)
+
+x = layers.GRU(128)(x)
+x = layers.Dropout(0.3)(x)
+x = layers.Dense(64, activation='relu')(x)
+x = layers.Dropout(0.2)(x)
+
+out = layers.Dense(len(labels), activation='softmax')(x)
+
+model = models.Model(inp, out)
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+model.summary()
+
+------------------------------------------------------------------------------------------------------
+
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(patience=6, restore_best_weights=True),
+    tf.keras.callbacks.ModelCheckpoint("best_crnn.h5", save_best_only=True),
+]
+
+history = model.fit(
+    X_train, y_train,
+    validation_data=(X_test, y_test),
+    epochs=60,
+    batch_size=8,
+    callbacks=callbacks
+)
+
+------------------------------------------------------------------------------------------------------
+
+print("\nFinal Training Accuracy: {:.2f}%".format(history.history['accuracy'][-1] * 100))
+print("Final Validation Accuracy: {:.2f}%".format(history.history['val_accuracy'][-1] * 100))
+
+------------------------------------------------------------------------------------------------------
+
+y_pred = model.predict(X_test)
+y_pred_labels = np.argmax(y_pred, axis=1)
+
+print(classification_report(y_test, y_pred_labels, target_names=labels))
+
+cm = confusion_matrix(y_test, y_pred_labels)
+plt.imshow(cm, cmap='Blues')
+plt.title("Confusion Matrix")
+plt.colorbar()
+plt.xticks(range(len(labels)), labels, rotation=45)
+plt.yticks(range(len(labels)), labels)
+plt.show()
+
+------------------------------------------------------------------------------------------------------
+
+model.save("vvcrnn_model.h5")
+
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+
+# Allow TF ops required for GRU
+converter.target_spec.supported_ops = [
+    tf.lite.OpsSet.TFLITE_BUILTINS,
+    tf.lite.OpsSet.SELECT_TF_OPS
+]
+
+# Disable TensorList lowering (required for GRU/LSTM export)
+converter._experimental_lower_tensor_list_ops = False
+
+# Optional: reduce size
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+tflite = converter.convert()
+
+with open("vvmodel.tflite", "wb") as f:
+    f.write(tflite)
+
+# Save labels
+with open("vvlabels.txt", "w") as f:
+    f.write("\n".join(labels))
+
+print("TFLite model exported successfully!")
+
+------------------------------------------------------------------------------------------------------
+
+from google.colab import files
+files.download("vvmodel.tflite")
+files.download("vvlabels.txt")
+files.download("vvcrnn_model.h5")
+
+
+
+
+
+
+
+
+
