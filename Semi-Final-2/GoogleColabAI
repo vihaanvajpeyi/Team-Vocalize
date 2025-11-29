@@ -290,6 +290,32 @@ files.download("vvmodel.tflite")
 files.download("vvlabels.txt")
 files.download("vvcrnn_model.h5")
 
+------------------------------------------------------------------------------------------------------
+
+# NOT NEEDED - PURELY FOR SHOW
+
+import matplotlib.pyplot as plt
+
+# Accuracy Curve
+plt.figure(figsize=(10, 5))
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title("Training vs Validation Accuracy")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Loss Curve
+plt.figure(figsize=(10, 5))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title("Training vs Validation Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.grid(True)
 
 
 
