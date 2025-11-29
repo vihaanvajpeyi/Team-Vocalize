@@ -66,9 +66,8 @@ def list_wavs(root):
 
 ------------------------------------------------------------------------------------------------------
 
-# --------------------------
+
 # Audio helpers
-# --------------------------
 
 def rms(y):
     return np.sqrt(np.mean(y**2))
@@ -82,9 +81,9 @@ def pad_trim(y, target_len=TARGET_LEN):
         y = np.pad(y, (0, target_len - len(y)))
     return y[:target_len]
 
-# --------------------------
+
 # Augmentation
-# --------------------------
+
 def augment_waveform(y, sr=SR):
     # Time shift
     if random.random() < 0.5:
@@ -110,9 +109,9 @@ def augment_waveform(y, sr=SR):
     return y
 
 
-# --------------------------
-# ⭐ STFT LOG-POWER FEATURE
-# --------------------------
+
+# STFT LOG-POWER FEATURE
+
 def waveform_to_stft(y, sr=SR):
     stft = librosa.stft(y, n_fft=N_FFT, hop_length=HOP, win_length=WIN)
     mag = np.abs(stft)
@@ -231,8 +230,14 @@ history = model.fit(
 
 ------------------------------------------------------------------------------------------------------
 
-print("\nFinal Training Accuracy: {:.2f}%".format(history.history['accuracy'][-1] * 100))
-print("Final Validation Accuracy: {:.2f}%".format(history.history['val_accuracy'][-1] * 100))
+# 1. Training Accuracy
+train_loss, train_acc = model.evaluate(X_train, y_train, verbose=0)
+
+# 2. Validation Accuracy
+val_loss, val_acc = model.evaluate(X_test, y_test, verbose=0)
+
+print("\nActual Training Accuracy: {:.2f}%".format(train_acc * 100))
+print("Actual Validation Accuracy: {:.2f}%".format(val_acc * 100))
 
 ------------------------------------------------------------------------------------------------------
 
