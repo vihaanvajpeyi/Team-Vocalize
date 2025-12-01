@@ -1,4 +1,4 @@
-!pip install -q librosa==0.10.0.post2 soundfile tqdm scikit-learn tensorflow==2.13.0
+!pip install -q librosa==0.10.0.post2 soundfile tqdm scikit-learn tensorflow==2.19.0
 
 import os, random, zipfile
 import numpy as np
