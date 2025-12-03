@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="20dp"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Top Brand Row -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <ImageView
+                android:id="@+id/wordmark"
+                android:layout_width="0dp"
+                android:layout_height="50dp"
+                android:layout_weight="1"
+                android:src="@drawable/vocalizewordmark"
+                android:adjustViewBounds="true"/>
+
+            <ImageView
+                android:id="@+id/logo"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:src="@drawable/vocalizelogo"
+                android:adjustViewBounds="true"/>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Earbud Speech Detection System"
+            android:textColor="#444444"
+            android:textSize="16sp"
+            android:paddingTop="4dp"
+            android:paddingBottom="12dp"
+            android:gravity="center"/>
+
+        <!-- Start Listening Button -->
+        <Button
+            android:id="@+id/listenButton"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="START LISTENING"
+            android:textSize="18sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/rounded_button"
+            android:layout_marginBottom="20dp"/>
+
+        <TextView
+            android:id="@+id/recognizedTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="RECOGNIZED TEXT:"
+            android:textSize="17sp"
+            android:textColor="#000000"
+            android:paddingBottom="6dp"/>
+
+        <TextView
+            android:id="@+id/recognizedText"
+            android:layout_width="match_parent"
+            android:layout_height="300dp"
+            android:text="Waiting..."
+            android:textSize="18sp"
+            android:padding="16dp"
+            android:gravity="top"
+            android:background="@drawable/rounded_box"/>
+    </LinearLayout>
+</ScrollView>
