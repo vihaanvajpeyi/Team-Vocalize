@@ -1,0 +1,238 @@
+package com.example.vocalizesf2
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.widget.Button
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.*
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var listenButton: Button
+    private lateinit var recognizedText: TextView
+
+    private var recorder: AudioRecorder? = null
+    private var model: TFLiteModel? = null
+    private var tts: TextToSpeech? = null
+
+    private var isListening = false
+    private val uiScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    // ---------------------------
+    // Permissions helper
+    // ---------------------------
+    private val REQUIRED_PERMISSIONS: Array<String>
+        get() {
+            val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                list.add(Manifest.permission.BLUETOOTH_CONNECT)
+                list.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            return list.toTypedArray()
+        }
+
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            val denied = results.filter { !it.value }.keys
+            if (denied.isEmpty()) {
+                Log.d("VCZ", "All permissions granted.")
+                startListening()
+                return@registerForActivityResult
+            }
+
+            Log.d("VCZ", "Permissions denied: $denied")
+
+            val permanentlyDenied = denied.any { perm ->
+                !shouldShowRequestPermissionRationale(perm)
+            }
+
+            if (permanentlyDenied) {
+                AlertDialog.Builder(this)
+                    .setTitle("Permission required")
+                    .setMessage("Microphone / Bluetooth permissions are required. Please enable them in App Settings.")
+                    .setPositiveButton("Open Settings") { _, _ ->
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        intent.data = Uri.parse("package:$packageName")
+                        startActivity(intent)
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            } else {
+                AlertDialog.Builder(this)
+                    .setTitle("Permission required")
+                    .setMessage("This app needs microphone and Bluetooth permission to listen. Allow permissions?")
+                    .setPositiveButton("Ask again") { _, _ -> requestMissingPermissions() }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+
+    private fun hasAllPermissions(): Boolean {
+        return REQUIRED_PERMISSIONS.all { perm ->
+            ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requestMissingPermissions() {
+        val missing = REQUIRED_PERMISSIONS.filter { perm ->
+            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+    }
+
+    // ---------------------------
+    // Lifecycle
+    // ---------------------------
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        Log.d("VCZ", "MainActivity ONCREATE")
+
+        listenButton = findViewById(R.id.listenButton)
+        recognizedText = findViewById(R.id.recognizedText)
+
+        // load model (blocking tiny op; if your model is big consider loading in coroutine)
+        try {
+            model = TFLiteModel(this)
+            Log.d("VCZ", "MODEL LOADED")
+        } catch (e: Exception) {
+            Log.e("VCZ", "Model load failed", e)
+            recognizedText.text = "Model failed to load"
+        }
+
+        // Text to speech
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                // prefer Locale.forLanguageTag on newer API but Locale("hi","IN") is fine
+                tts?.language = Locale("hi", "IN")
+                Log.d("VCZ", "TTS READY")
+            } else {
+                Log.w("VCZ", "TTS init failed: $status")
+            }
+        }
+
+        listenButton.setOnClickListener {
+            Log.d("VCZ", "BUTTON CLICKED")
+            if (isListening) stopListening() else {
+                // check & ask permissions
+                if (!hasAllPermissions()) {
+                    Log.d("VCZ", "Permissions missing, requesting...")
+                    requestMissingPermissions()
+                    return@setOnClickListener
+                }
+                startListening()
+            }
+        }
+    }
+
+    // ---------------------------
+    // Start / Stop listening
+    // ---------------------------
+    private fun startListening() {
+        Log.d("VCZ", "startListening() called")
+
+        if (!hasAllPermissions()) {
+            Log.d("VCZ", "Missing permissions - aborting startListening")
+            requestMissingPermissions()
+            return
+        }
+
+        // Try enabling Bluetooth SCO mic (best-effort)
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as? android.media.AudioManager
+            am?.startBluetoothSco()
+            am?.isBluetoothScoOn = true
+        } catch (e: Exception) {
+            Log.w("VCZ", "Could not start Bluetooth SCO: ${e.message}")
+        }
+
+        // Use the singleton AudioRecorder instance (your AudioRecorder is a singleton)
+        recorder = AudioRecorder.getInstance(16000, 2.0).also { rec ->
+            rec.setOnDataReadyListener { pcmShortArray ->
+                // pcmShortArray: ShortArray
+                uiScope.launch(Dispatchers.Default) {
+                    try {
+                        // Preprocessing: your Preprocessing returns a batched mel: shape [1][96][T] (Float)
+                        val melBatched = Preprocessing.audioToMelspectrogram(pcmShortArray)
+                        // unwrap batch dim
+                        val mel = if (melBatched.isNotEmpty()) melBatched[0] else arrayOf<FloatArray>()
+
+                        // Build model input expected by TFLiteModel.predict: Array<Array<FloatArray>>
+                        // where input[melIdx][timeIdx] is FloatArray (channels=1)
+                        val nMels = mel.size
+                        val timeFrames = if (nMels > 0) mel[0].size else 0
+
+                        val input = Array(nMels) { m ->
+                            Array(timeFrames) { t ->
+                                floatArrayOf(mel[m][t])
+                            }
+                        }
+
+                        val predicted = model?.predict(input) ?: "unknown"
+
+                        Log.d("VCZ", "INFERENCE -> $predicted")
+
+                        withContext(Dispatchers.Main) {
+                            recognizedText.text = predicted
+                        }
+
+                        // speak on main thread
+                        withContext(Dispatchers.Main) {
+                            tts?.speak(predicted, TextToSpeech.QUEUE_FLUSH, null, "utt1")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("VCZ", "Error during inference pipeline", e)
+                    }
+                }
+            }
+
+            rec.start()
+            Log.d("VCZ", "Recorder started")
+        }
+
+        listenButton.text = "LISTENING..."
+        isListening = true
+    }
+
+    private fun stopListening() {
+        Log.d("VCZ", "stopListening()")
+        recorder?.stop()
+        recorder = null
+        isListening = false
+        listenButton.text = "START LISTENING"
+
+        // try stop Bluetooth SCO
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as? android.media.AudioManager
+            am?.stopBluetoothSco()
+            am?.isBluetoothScoOn = false
+        } catch (e: Exception) {
+            Log.w("VCZ", "Could not stop Bluetooth SCO: ${e.message}")
+        }
+    }
+
+    // ---------------------------
+    // Cleanup
+    // ---------------------------
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d("VCZ", "onDestroy() called")
+        recorder?.stop()
+        tts?.shutdown()
+        model?.close()
+        uiScope.cancel()
+    }
+}
