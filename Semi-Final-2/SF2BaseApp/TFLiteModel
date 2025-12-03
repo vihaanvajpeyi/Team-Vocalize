@@ -1,0 +1,131 @@
+package com.example.vocalizesf2
+
+import android.content.Context
+import android.util.Log
+import org.tensorflow.lite.Interpreter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.max
+import kotlin.math.min
+
+class TFLiteModel(context: Context) {
+
+    private val interpreter: Interpreter
+    private val labels: List<String>
+    private val modelInputShape: IntArray // e.g. [1, 96, 400, 1]
+    private val expectedMelBins: Int
+    private val expectedTimeFrames: Int
+    private val expectedChannels: Int
+
+    init {
+        // load model bytes into direct bytebuffer
+        val modelBytes = context.assets.open("model.tflite").readBytes()
+        val bb = ByteBuffer.allocateDirect(modelBytes.size).order(ByteOrder.nativeOrder())
+        bb.put(modelBytes)
+        bb.rewind()
+
+        interpreter = Interpreter(bb)
+
+        // load labels
+        labels = context.assets.open("labels.txt")
+            .bufferedReader()
+            .readLines().filter { it.isNotBlank() }
+
+        // read input shape from model
+        modelInputShape = interpreter.getInputTensor(0).shape() // NB: shape order [1, melBins, timeFrames, channels]
+        // defensive fallback
+        if (modelInputShape.size < 4) {
+            throw IllegalStateException("Unexpected model input tensor shape: ${modelInputShape.contentToString()}")
+        }
+        expectedMelBins = modelInputShape[1]
+        expectedTimeFrames = modelInputShape[2]
+        expectedChannels = modelInputShape[3]
+
+        Log.d("VCZ", "TFLite loaded. labels=${labels.size}, inputShape=${modelInputShape.contentToString()}")
+    }
+
+    /**
+     * input: Array[melBins][timeFrames]{ FloatArray(channels) }  (channels usually 1)
+     * returns label String
+     */
+    fun predict(input: Array<Array<FloatArray>>): String {
+        // sanity
+        val melBins = input.size
+        val timeFrames = if (melBins > 0) input[0].size else 0
+        val channels = if (melBins > 0 && timeFrames > 0) input[0][0].size else 1
+
+        Log.d("VCZ", "predict() called: input melBins=$melBins timeFrames=$timeFrames channels=$channels; model expects melBins=$expectedMelBins timeFrames=$expectedTimeFrames channels=$expectedChannels")
+
+        // If melBins doesn't match expected, log and try to adapt (preferably they should match)
+        if (melBins != expectedMelBins) {
+            Log.w("VCZ", "Mel bin count mismatch: got $melBins but model expects $expectedMelBins. Attempting to adapt by truncation/padding on mel axis.")
+        }
+
+        // Prepare resized array with model expected dims: [1][expectedMelBins][expectedTimeFrames][expectedChannels]
+        val javaInput = Array(1) {
+            Array(expectedMelBins) {
+                Array(expectedTimeFrames) {
+                    FloatArray(expectedChannels)
+                }
+            }
+        }
+
+        // Fill javaInput by mapping from provided `input`. We will:
+        // - For mel axis: center-copy if sizes differ (truncate or pad zeros)
+        // - For time axis: center-crop or zero-pad to expectedTimeFrames
+
+        // compute mel copy offsets
+        val melOffsetSrcStart = if (melBins > expectedMelBins) (melBins - expectedMelBins) / 2 else 0
+        val melOffsetDstStart = if (expectedMelBins > melBins) (expectedMelBins - melBins) / 2 else 0
+
+        for (mDst in 0 until expectedMelBins) {
+            val mSrc = mDst - melOffsetDstStart + melOffsetSrcStart
+            val melExists = (mSrc in 0 until melBins)
+
+            // time cropping/padding center
+            val srcTimeFrames = if (melExists) input[mSrc].size else 0
+            val timeOffsetSrcStart = if (srcTimeFrames > expectedTimeFrames) (srcTimeFrames - expectedTimeFrames) / 2 else 0
+            val timeOffsetDstStart = if (expectedTimeFrames > srcTimeFrames) (expectedTimeFrames - srcTimeFrames) / 2 else 0
+
+            for (tDst in 0 until expectedTimeFrames) {
+                val tSrc = tDst - timeOffsetDstStart + timeOffsetSrcStart
+                if (melExists && tSrc in 0 until srcTimeFrames) {
+                    // copy channels (if mismatch, copy up to min)
+                    val srcChannels = input[mSrc][tSrc].size
+                    val copyCount = min(srcChannels, expectedChannels)
+                    for (c in 0 until copyCount) {
+                        javaInput[0][mDst][tDst][c] = input[mSrc][tSrc][c]
+                    }
+                    // if expectedChannels > srcChannels, remaining channel dims remain 0.0f
+                } else {
+                    // out-of-range -> leave zeros (padding)
+                }
+            }
+        }
+
+        // Prepare output buffer
+        val output = Array(1) { FloatArray(labels.size) }
+
+        // Run interpreter
+        interpreter.run(javaInput, output)
+
+        // Argmax
+        val scores = output[0]
+        var best = 0
+        var bestScore = Float.NEGATIVE_INFINITY
+        for (i in scores.indices) {
+            if (scores[i] > bestScore) {
+                bestScore = scores[i]
+                best = i
+            }
+        }
+
+        val label = labels.getOrNull(best) ?: "unknown"
+        Log.d("VCZ", "predict -> $label (score=$bestScore)")
+        return label
+    }
+
+    fun close() {
+        interpreter.close()
+    }
+}
