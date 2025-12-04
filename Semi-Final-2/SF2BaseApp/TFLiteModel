@@ -3,25 +3,41 @@ package com.example.vocalizesf2
 import android.content.Context
 import android.util.Log
 import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.max
-import kotlin.math.min
+import java.nio.channels.FileChannel
+
+/**
+ * TFLiteModel.kt
+ * Loads model.tflite and labels.txt from assets.
+ * Expects model input shape [1,96,201,1].
+ *
+ * Usage:
+ *   val model = TFLiteModel(context)
+ *   val predicted = model.predict(melBatched[0]) // melBatched from Preprocessing.audioToMelspectrogram()
+ *   model.close()
+ */
 
 class TFLiteModel(context: Context) {
 
     private val interpreter: Interpreter
     private val labels: List<String>
-    private val modelInputShape: IntArray
+    private val inputShape: IntArray
     private val expectedMelBins: Int
     private val expectedTimeFrames: Int
     private val expectedChannels: Int
 
     init {
-        val modelBytes = context.assets.open("model.tflite").readBytes()
-        val bb = ByteBuffer.allocateDirect(modelBytes.size).order(ByteOrder.nativeOrder())
-        bb.put(modelBytes)
-        bb.rewind()
+        // load model bytes into direct ByteBuffer for Interpreter
+        val assetManager = context.assets
+        val fd = assetManager.openFd("model.tflite")
+        val inputStream = FileInputStream(fd.fileDescriptor)
+        val fileChannel = inputStream.channel
+        val start = fd.startOffset
+        val declaredLength = fd.declaredLength
+        val bb = fileChannel.map(FileChannel.MapMode.READ_ONLY, start, declaredLength)
+        bb.order(ByteOrder.nativeOrder())
 
         val options = Interpreter.Options().apply {
             setNumThreads(4)
@@ -29,29 +45,33 @@ class TFLiteModel(context: Context) {
         }
         interpreter = Interpreter(bb, options)
 
-        labels = context.assets.open("labels.txt")
-            .bufferedReader()
-            .readLines()
-            .filter { it.isNotBlank() }
+        // load labels
+        labels = assetManager.open("labels.txt").bufferedReader().useLines { it.filter { s -> s.isNotBlank() }.toList() }
 
-        modelInputShape = interpreter.getInputTensor(0).shape()
-        if (modelInputShape.size < 4) throw IllegalStateException("Unexpected model input shape: ${modelInputShape.contentToString()}")
-        expectedMelBins = modelInputShape[1]
-        expectedTimeFrames = modelInputShape[2]
-        expectedChannels = modelInputShape[3]
+        inputShape = interpreter.getInputTensor(0).shape() // e.g. [1,96,201,1]
+        if (inputShape.size < 4) throw IllegalStateException("Unexpected model input shape: ${inputShape.contentToString()}")
 
-        Log.d("VCZ", "TFLite loaded. labels=${labels.size}, inputShape=${modelInputShape.contentToString()}")
+        expectedMelBins = inputShape[1]
+        expectedTimeFrames = inputShape[2]
+        expectedChannels = inputShape[3]
+
+        Log.d("VCZ", "TFLite loaded: labels=${labels.size}, inputShape=${inputShape.contentToString()}")
     }
 
-    fun predict(input: Array<Array<FloatArray>>): String {
-        val melBins = input.size
-        val timeFrames = if (melBins > 0) input[0].size else 0
-        val channels = if (melBins > 0 && timeFrames > 0) input[0][0].size else 1
+    /**
+     * predict
+     * Accepts mel: Array<Array<FloatArray>> of shape [96][201] (not batched)
+     * Returns the label string with highest score.
+     */
+    fun predict(mel: Array<FloatArray>): String {
+        // Validate dimensions
+        val melBins = mel.size
+        val tFrames = if (melBins > 0) mel[0].size else 0
 
-        Log.d("VCZ", "predict() input melBins=$melBins timeFrames=$timeFrames channels=$channels; model expects melBins=$expectedMelBins timeFrames=$expectedTimeFrames channels=$expectedChannels")
+        Log.d("VCZ", "Predict called: melBins=$melBins tFrames=$tFrames expected=${expectedMelBins}x${expectedTimeFrames}")
 
-        // Create java-compatible 4D array: float[1][expectedMelBins][expectedTimeFrames][expectedChannels]
-        val javaInput = Array(1) {
+        // create input in shape [1][96][201][1]
+        val input = Array(1) {
             Array(expectedMelBins) {
                 Array(expectedTimeFrames) {
                     FloatArray(expectedChannels)
@@ -59,37 +79,38 @@ class TFLiteModel(context: Context) {
             }
         }
 
-        // Center-copy / pad mel -> javaInput
         val melOffsetSrcStart = if (melBins > expectedMelBins) (melBins - expectedMelBins) / 2 else 0
         val melOffsetDstStart = if (expectedMelBins > melBins) (expectedMelBins - melBins) / 2 else 0
 
         for (mDst in 0 until expectedMelBins) {
             val mSrc = mDst - melOffsetDstStart + melOffsetSrcStart
             val melExists = (mSrc in 0 until melBins)
-            val srcTimeFrames = if (melExists) input[mSrc].size else 0
-            val timeOffsetSrcStart = if (srcTimeFrames > expectedTimeFrames) (srcTimeFrames - expectedTimeFrames) / 2 else 0
-            val timeOffsetDstStart = if (expectedTimeFrames > srcTimeFrames) (expectedTimeFrames - srcTimeFrames) / 2 else 0
+            val srcTimeFrames = if (melExists) mel[mSrc].size else 0
+            val tOffsetSrcStart = if (srcTimeFrames > expectedTimeFrames) (srcTimeFrames - expectedTimeFrames) / 2 else 0
+            val tOffsetDstStart = if (expectedTimeFrames > srcTimeFrames) (expectedTimeFrames - srcTimeFrames) / 2 else 0
 
             for (tDst in 0 until expectedTimeFrames) {
-                val tSrc = tDst - timeOffsetDstStart + timeOffsetSrcStart
+                val tSrc = tDst - tOffsetDstStart + tOffsetSrcStart
                 if (melExists && tSrc in 0 until srcTimeFrames) {
-                    val srcChannels = input[mSrc][tSrc].size
-                    val copyCount = min(srcChannels, expectedChannels)
-                    for (c in 0 until copyCount) {
-                        javaInput[0][mDst][tDst][c] = input[mSrc][tSrc][c]
-                    }
+                    // copy channel 0
+                    input[0][mDst][tDst][0] = mel[mSrc][tSrc]
                 } else {
-                    // zero pad
+                    // leaves zero-padding if outside source range
                 }
             }
         }
 
         val output = Array(1) { FloatArray(labels.size) }
-        interpreter.run(javaInput, output)
+        try {
+            interpreter.run(input, output)
+        } catch (e: Exception) {
+            Log.e("VCZ", "TFLite run failed", e)
+            return "model_error"
+        }
 
         val scores = output[0]
         var best = 0
-        var bestScore = scores.getOrElse(0) { Float.NEGATIVE_INFINITY }
+        var bestScore = Float.NEGATIVE_INFINITY
         for (i in scores.indices) {
             if (scores[i] > bestScore) {
                 bestScore = scores[i]
@@ -97,12 +118,16 @@ class TFLiteModel(context: Context) {
             }
         }
 
-        val label = labels.getOrElse(best) { "unknown" }
-        Log.d("VCZ", "predict -> $label (score=$bestScore)")
+        val label = labels.getOrNull(best) ?: "unknown"
+        Log.d("VCZ", "predict -> $label score=$bestScore")
         return label
     }
 
     fun close() {
-        interpreter.close()
+        try {
+            interpreter.close()
+        } catch (e: Exception) {
+            Log.w("VCZ", "Interpreter close failed: ${e.message}")
+        }
     }
 }
