@@ -6,13 +6,13 @@ plugins {
 android {
     namespace = "com.example.vocalizesf2"
     compileSdk {
-        version = release(36)
+        version = release(34)
     }
 
     defaultConfig {
         applicationId = "com.example.vocalizesf2"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
