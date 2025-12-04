@@ -3,8 +3,6 @@ package com.example.vocalizesf2
 import android.util.Log
 import kotlin.math.*
 
-// Port of the Python librosa pipeline used in training.
-// Returns shape [1][N_MELS][timeFrames] as Float (batch dim first).
 object Preprocessing {
 
     private const val SR = 16000
@@ -22,30 +20,13 @@ object Preprocessing {
     private const val RMS_TARGET = 0.02f
     private const val EPS = 1e-10f
 
-    // Public entry: takes raw pcm (ShortArray, 16-bit signed) and returns batched mel: [1][96][T]
-    fun audioToMelspectrogram(pcmShort: ShortArray): Array<Array<FloatArray>> {
-        // 1) convert to float -1..1
-        val y = FloatArray(pcmShort.size) { i -> pcmShort[i] / 32768f }
-
-        // 2) pad / trim to TARGET_LEN
-        val yT = padTrim(y, TARGET_LEN)
-
-        // 3) RMS gain normalization (match apply_gain_normalization)
-        val yNorm = applyGainNormalization(yT, RMS_TARGET)
-
-        // 4) center pad (librosa center=True) — reflect padding by n_fft//2
+    fun audioToMelspectrogram(pcm: ShortArray): Array<Array<FloatArray>> {
+        val y = FloatArray(pcm.size) { i -> pcm[i] / 32768f }
+        val yTrim = padTrim(y, TARGET_LEN)
+        val yNorm = applyGainNormalization(yTrim, RMS_TARGET)
         val pad = N_FFT / 2
         val yP = reflectPad(yNorm, pad)
 
-        // 5) framing and windowing
-        val nFrames = 1 + ((yP.size - N_FFT) / HOP)
-        // safety
-        if (nFrames <= 0) {
-            Log.w("VCZ", "nFrames <= 0, returning zeros")
-            return Array(1) { Array(N_MELS) { FloatArray(1) { 0f } } }
-        }
-
-        // compute window (hann of length WIN centered in N_FFT)
         val win = FloatArray(N_FFT) { 0f }
         val offset = (N_FFT - WIN) / 2
         for (i in 0 until WIN) {
@@ -53,74 +34,51 @@ object Preprocessing {
             win[offset + i] = w
         }
 
-        // STFT frames -> power spectrogram
+        val nFrames = 1 + ((yP.size - N_FFT) / HOP)
         val half = N_FFT / 2 + 1
         val spec = Array(nFrames) { FloatArray(half) { 0f } }
-
         val fftBuff = FloatArray(N_FFT)
+
         for (frame in 0 until nFrames) {
             val start = frame * HOP
-            // copy frame
-            var i = 0
-            while (i < N_FFT) {
-                fftBuff[i] = yP[start + i] * win[i]
-                i++
-            }
-            // compute magnitude spectrum
+            for (i in 0 until N_FFT) fftBuff[i] = yP[start + i] * win[i]
             val mag = rfftMag(fftBuff)
-            // power spectrogram (magnitude^2)
             for (k in 0 until half) {
                 val v = mag[k]
                 spec[frame][k] = v * v
             }
         }
 
-        // 6) mel filterbank
         val melFb = melFilterBank(N_MELS, N_FFT, SR, FMIN, FMAX)
-        val mel = Array(N_MELS) { FloatArray(nFrames) { 0f } } // [mel][time]
+        val mel = Array(N_MELS) { FloatArray(nFrames) { 0f } }
         for (m in 0 until N_MELS) {
             val filt = melFb[m]
             for (t in 0 until nFrames) {
                 var s = 0f
                 val sp = spec[t]
-                var k = 0
-                while (k < sp.size) {
-                    s += sp[k] * filt[k]
-                    k++
-                }
+                for (k in sp.indices) s += sp[k] * filt[k]
                 mel[m][t] = s
             }
         }
 
-        // 7) power_to_db(ref=np.max)
         var globalMax = EPS.toFloat()
-        for (m in 0 until N_MELS) {
-            for (t in 0 until nFrames) {
-                if (mel[m][t] > globalMax) globalMax = mel[m][t]
-            }
-        }
+        for (m in 0 until N_MELS) for (t in 0 until nFrames) if (mel[m][t] > globalMax) globalMax = mel[m][t]
         val melDb = Array(N_MELS) { FloatArray(nFrames) { 0f } }
         val factor = 10f
-        for (m in 0 until N_MELS) {
-            for (t in 0 until nFrames) {
-                // db = 10 * log10(S) - 10*log10(ref)  <=> 10*log10(S/ref)
-                val v = mel[m][t]
-                val db = factor * (ln((v + EPS).toDouble()) / ln(10.0) - ln(globalMax.toDouble() + EPS) / ln(10.0))
-                melDb[m][t] = db.toFloat()
-            }
+        for (m in 0 until N_MELS) for (t in 0 until nFrames) {
+            val v = mel[m][t]
+            val db = factor * (ln((v + EPS).toDouble()) / ln(10.0) - ln(globalMax.toDouble() + EPS) / ln(10.0))
+            melDb[m][t] = db.toFloat()
         }
 
-        // 8) normalize per-sample (per example): (mel_db - mean) / (std + 1e-6)
         var sum = 0.0
         var sq = 0.0
         var count = 0
-        for (m in 0 until N_MELS) {
-            for (t in 0 until nFrames) {
-                val v = melDb[m][t].toDouble()
-                sum += v
-                sq += v * v
-                count++
-            }
+        for (m in 0 until N_MELS) for (t in 0 until nFrames) {
+            val v = melDb[m][t].toDouble()
+            sum += v
+            sq += v * v
+            count++
         }
         val mean = (sum / max(1, count)).toFloat()
         val variance = (sq / max(1, count) - mean * mean).toFloat()
@@ -128,13 +86,9 @@ object Preprocessing {
         val denom = std + 1e-6f
 
         val melNorm = Array(N_MELS) { FloatArray(nFrames) { 0f } }
-        for (m in 0 until N_MELS) {
-            for (t in 0 until nFrames) {
-                melNorm[m][t] = (melDb[m][t] - mean) / denom
-            }
-        }
+        for (m in 0 until N_MELS) for (t in 0 until nFrames) melNorm[m][t] = (melDb[m][t] - mean) / denom
 
-        // Logging summary (optional)
+        // log sample stats (optional)
         runCatching {
             var minv = Float.POSITIVE_INFINITY
             var maxv = Float.NEGATIVE_INFINITY
@@ -154,22 +108,17 @@ object Preprocessing {
             Log.d("VCZ", "MEL SHAPE=${N_MELS}x$nFrames min=$minv max=$maxv mean=$mean2 std=$std2")
         }
 
-        // Return batched [1][N_MELS][nFrames]
+        // return batched [1][96][201]
         return arrayOf(melNorm)
     }
 
-    // ---------------------
     // helpers
-    // ---------------------
     private fun padTrim(y: FloatArray, targetLen: Int): FloatArray {
         return if (y.size < targetLen) {
             val out = FloatArray(targetLen)
             System.arraycopy(y, 0, out, 0, y.size)
-            // remaining zeros - same as numpy pad constant 0
             out
-        } else {
-            y.copyOfRange(0, targetLen)
-        }
+        } else y.copyOfRange(0, targetLen)
     }
 
     private fun applyGainNormalization(y: FloatArray, target: Float): FloatArray {
@@ -184,14 +133,11 @@ object Preprocessing {
 
     private fun reflectPad(y: FloatArray, pad: Int): FloatArray {
         val out = FloatArray(y.size + pad * 2)
-        // left pad (mirror)
         for (i in 0 until pad) {
             val src = pad - i
             out[i] = if (src < y.size) y[src] else y[0]
         }
-        // center
         System.arraycopy(y, 0, out, pad, y.size)
-        // right pad
         for (i in 0 until pad) {
             val src = y.size - 2 - i
             out[pad + y.size + i] = if (src >= 0) y[src] else y[y.size - 1]
@@ -199,64 +145,41 @@ object Preprocessing {
         return out
     }
 
-    // Create mel filterbank - triangular filters
     private fun melFilterBank(nMels: Int, nFft: Int, sr: Int, fmin: Double, fmax: Double): Array<FloatArray> {
         val fftFreqs = DoubleArray(nFft / 2 + 1) { i -> i.toDouble() * sr.toDouble() / nFft.toDouble() }
-        // mel <-> hz conversions
         fun hzToMel(f: Double) = 2595.0 * log10(1.0 + f / 700.0)
         fun melToHz(m: Double) = 700.0 * (10.0.pow(m / 2595.0) - 1.0)
-
         val mMin = hzToMel(fmin)
         val mMax = hzToMel(fmax)
         val mPts = DoubleArray(nMels + 2) { i -> mMin + (mMax - mMin) * i / (nMels + 1) }
         val hzPts = mPts.map { melToHz(it) }.toDoubleArray()
-
         val bin = IntArray(hzPts.size) { i ->
-            // floor((n_fft + 1) * hzPts[i] / sr)
             val v = (nFft + 1) * hzPts[i] / sr
             floor(v).toInt().coerceIn(0, nFft / 2)
         }
-
         val fb = Array(nMels) { FloatArray(nFft / 2 + 1) { 0f } }
         for (m in 1..nMels) {
             val fLeft = bin[m - 1]
             val fCenter = bin[m]
             val fRight = bin[m + 1]
-
-            if (fCenter == fLeft && fCenter == fRight) {
-                // degenerate
-                continue
-            }
-
+            if (fCenter == fLeft && fCenter == fRight) continue
             for (k in fLeft..fCenter) {
-                if (fCenter - fLeft > 0) {
-                    fb[m - 1][k] = ((k - fLeft).toFloat() / (fCenter - fLeft).toFloat())
-                }
+                if (fCenter - fLeft > 0) fb[m - 1][k] = ((k - fLeft).toFloat() / (fCenter - fLeft).toFloat())
             }
             for (k in fCenter..fRight) {
-                if (fRight - fCenter > 0) {
-                    fb[m - 1][k] = ((fRight - k).toFloat() / (fRight - fCenter).toFloat())
-                }
+                if (fRight - fCenter > 0) fb[m - 1][k] = ((fRight - k).toFloat() / (fRight - fCenter).toFloat())
             }
         }
-
         return fb
     }
 
-    // Real FFT magnitude (returns length N/2+1 magnitude)
-    // Uses a simple iterative Cooley-Tukey radix-2 FFT on complex arrays.
-    // For performance-critical projects consider using a native FFT library.
     private fun rfftMag(frame: FloatArray): FloatArray {
         val n = frame.size
-        // next power of two check
         var N = 1
         while (N < n) N = N shl 1
-        // if N != n, pad zeros (should not happen as n == N_FFT == power of two 512)
-        val real = DoubleArray(N) { 0.0 }
-        val imag = DoubleArray(N) { 0.0 }
+        val real = DoubleArray(N)
+        val imag = DoubleArray(N)
         for (i in 0 until n) real[i] = frame[i].toDouble()
-
-        // bit-reverse copy
         var j = 0
         for (i in 1 until N) {
             var bit = N shr 1
@@ -266,16 +189,10 @@ object Preprocessing {
             }
             j = j xor bit
             if (i < j) {
-                val tmp = real[i]
-                real[i] = real[j]
-                real[j] = tmp
-                val tmpi = imag[i]
-                imag[i] = imag[j]
-                imag[j] = tmpi
+                val tmp = real[i]; real[i] = real[j]; real[j] = tmp
+                val tmpi = imag[i]; imag[i] = imag[j]; imag[j] = tmpi
             }
         }
-
-        // Cooley-Tukey
         var len = 2
         while (len <= N) {
             val ang = -2.0 * Math.PI / len
@@ -291,12 +208,10 @@ object Preprocessing {
                     val uImag = imag[i + j2]
                     val vReal = real[i + j2 + len / 2] * wReal - imag[i + j2 + len / 2] * wImag
                     val vImag = real[i + j2 + len / 2] * wImag + imag[i + j2 + len / 2] * wReal
-
                     real[i + j2] = uReal + vReal
                     imag[i + j2] = uImag + vImag
                     real[i + j2 + len / 2] = uReal - vReal
                     imag[i + j2 + len / 2] = uImag - vImag
-
                     val tmpW = wReal * wlenReal - wImag * wlenImag
                     wImag = wReal * wlenImag + wImag * wlenReal
                     wReal = tmpW
@@ -306,7 +221,6 @@ object Preprocessing {
             }
             len = len shl 1
         }
-
         val half = N / 2 + 1
         val mag = FloatArray(half)
         for (k in 0 until half) {
