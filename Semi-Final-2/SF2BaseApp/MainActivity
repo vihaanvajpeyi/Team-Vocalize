@@ -30,30 +30,27 @@ class MainActivity : AppCompatActivity() {
     private var isListening = false
     private val uiScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // ------------------------------------------------------------
-// RUNTIME PERMISSIONS (SINGLE SOURCE OF TRUTH)
-// ------------------------------------------------------------
-    private val REQUIRED_PERMISSIONS: Array<String>
+    // --------------------------------------------------------------------
+    // PERMISSIONS
+    // --------------------------------------------------------------------
+    private val requiredPermissions: Array<String>
         get() {
-            val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+            val arr = mutableListOf(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                list.add(Manifest.permission.BLUETOOTH_CONNECT)
-                list.add(Manifest.permission.BLUETOOTH_SCAN)
+                arr.add(Manifest.permission.BLUETOOTH_CONNECT)
+                arr.add(Manifest.permission.BLUETOOTH_SCAN)
             }
-            return list.toTypedArray()
+            return arr.toTypedArray()
         }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
             val denied = results.filter { !it.value }.keys
-
             if (denied.isEmpty()) {
-                Log.d("VCZ", "All permissions granted → starting listening")
+                Log.d("VCZ", "All permissions granted")
                 startListening()
                 return@registerForActivityResult
             }
-
-            Log.d("VCZ", "Permissions denied: $denied")
 
             val permanentlyDenied = denied.any { perm ->
                 !shouldShowRequestPermissionRationale(perm)
@@ -62,7 +59,7 @@ class MainActivity : AppCompatActivity() {
             if (permanentlyDenied) {
                 AlertDialog.Builder(this)
                     .setTitle("Permission required")
-                    .setMessage("Microphone and Bluetooth permissions are required. Enable them in App Settings.")
+                    .setMessage("Microphone and Bluetooth permissions are required for Vocalize.")
                     .setPositiveButton("Open Settings") { _, _ ->
                         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                         intent.data = Uri.parse("package:$packageName")
@@ -73,7 +70,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 AlertDialog.Builder(this)
                     .setTitle("Permission required")
-                    .setMessage("This app needs microphone & Bluetooth to function.")
+                    .setMessage("This app needs microphone & Bluetooth to listen. Allow permissions?")
                     .setPositiveButton("Ask again") { _, _ -> requestMissingPermissions() }
                     .setNegativeButton("Cancel", null)
                     .show()
@@ -81,70 +78,62 @@ class MainActivity : AppCompatActivity() {
         }
 
     private fun hasAllPermissions(): Boolean =
-        REQUIRED_PERMISSIONS.all { perm ->
+        requiredPermissions.all { perm ->
             ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
         }
 
     private fun requestMissingPermissions() {
-        val missing = REQUIRED_PERMISSIONS.filter { perm ->
-            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+        val missing = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }.toTypedArray()
 
         if (missing.isNotEmpty()) permissionLauncher.launch(missing)
     }
 
-    // ------------------------------------------------------------
-// ON CREATE
-// ------------------------------------------------------------
+    // --------------------------------------------------------------------
+    // ON CREATE
+    // --------------------------------------------------------------------
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        Log.d("VCZ", "MainActivity ONCREATE")
-
         listenButton = findViewById(R.id.listenButton)
         recognizedText = findViewById(R.id.recognizedText)
 
-// Load TFLite model
+        // Load TFLite model
         try {
             model = TFLiteModel(this)
-            Log.d("VCZ", "MODEL LOADED SUCCESSFULLY")
+            Log.d("VCZ", "TFLite MODEL loaded successfully")
         } catch (e: Exception) {
-            Log.e("VCZ", "Model load failed", e)
+            Log.e("VCZ", "Model load FAILED", e)
             recognizedText.text = "Model failed to load"
         }
 
-// Setup TTS
+        // TTS
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 tts?.language = Locale("hi", "IN")
-                Log.d("VCZ", "TTS READY")
-            } else {
-                Log.w("VCZ", "TTS init failed: $status")
             }
         }
 
-// Button behavior
+        // BUTTON
         listenButton.setOnClickListener {
-            Log.d("VCZ", "BUTTON CLICKED")
-
             if (isListening) {
                 stopListening()
             } else {
                 if (!hasAllPermissions()) {
-                    Log.d("VCZ", "Permissions missing → requesting")
                     requestMissingPermissions()
                     return@setOnClickListener
                 }
-
                 startListening()
             }
         }
     }
 
-    // ------------------------------------------------------------
-// START LISTENING
-// ------------------------------------------------------------
+
+    // --------------------------------------------------------------------
+    // START LISTENING
+    // --------------------------------------------------------------------
     private fun startListening() {
         Log.d("VCZ", "startListening()")
 
@@ -153,82 +142,81 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-// Try to improve Bluetooth microphone routing
+        // Try Bluetooth SCO (optional, may not work on newer Android)
         try {
             val am = getSystemService(AUDIO_SERVICE) as? android.media.AudioManager
             am?.startBluetoothSco()
             am?.isBluetoothScoOn = true
-        } catch (e: Exception) {
-            Log.w("VCZ", "Bluetooth SCO start failed: ${e.message}")
-        }
+        } catch (_: Exception) {}
 
         recorder = AudioRecorder.getInstance(16000, 2.0).also { rec ->
+
             rec.setOnDataReadyListener { pcm ->
 
                 uiScope.launch(Dispatchers.Default) {
                     try {
-                        val melBatched = Preprocessing.audioToMelspectrogram(pcm)
-                        val mel = melBatched.getOrNull(0) ?: arrayOf<FloatArray>()
+                        // FULL CORRECT PREPROCESSING → EXACT SAME AS PYTHON
+                        val melBatch = Preprocessing.audioToMelspectrogram(pcm)
+                        val mel = melBatch[0]     // [96][201]
 
-                        val nMels = mel.size
-                        val tFrames = if (nMels > 0) mel[0].size else 0
+                        // FEED DIRECTLY → TFLiteModel handles formatting
+                        val predicted = model?.predict(mel) ?: "unknown"
 
-                        val input = Array(nMels) { m ->
-                            Array(tFrames) { t ->
-                                floatArrayOf(mel[m][t])
-                            }
-                        }
-
-                        val predicted = model?.predict(input) ?: "unknown"
-                        Log.d("VCZ", "Predicted: $predicted")
+                        Log.d("VCZ", "Predicted = $predicted")
 
                         withContext(Dispatchers.Main) {
+
+                            // Show it in the UI (optional, you may hide "base" if preferred)
                             recognizedText.text = predicted
+
+                            // If class is "base", do NOT speak anything
+                            if (predicted.lowercase() == "base") {
+                                Log.d("VCZ", "Silent class detected → no TTS output")
+                                // tts?.speak("", TextToSpeech.QUEUE_FLUSH, null, "utt1")  // <-- DON'T speak
+                                return@withContext
+                            }
+
+                            // Speak for all non-base classes
                             tts?.speak(predicted, TextToSpeech.QUEUE_FLUSH, null, "utt1")
                         }
 
+
                     } catch (e: Exception) {
-                        Log.e("VCZ", "Error during inference", e)
+                        Log.e("VCZ", "Inference error", e)
                     }
                 }
             }
 
             rec.start()
-            Log.d("VCZ", "Recorder STARTED")
         }
 
-        listenButton.text = "LISTENING..."
         isListening = true
+        listenButton.text = "LISTENING..."
     }
 
-    // ------------------------------------------------------------
-// STOP LISTENING
-// ------------------------------------------------------------
-    private fun stopListening() {
-        Log.d("VCZ", "stopListening()")
 
+    // --------------------------------------------------------------------
+    // STOP LISTENING
+    // --------------------------------------------------------------------
+    private fun stopListening() {
         recorder?.stop()
         recorder = null
         isListening = false
-
         listenButton.text = "START LISTENING"
 
         try {
             val am = getSystemService(AUDIO_SERVICE) as? android.media.AudioManager
             am?.stopBluetoothSco()
             am?.isBluetoothScoOn = false
-        } catch (e: Exception) {
-            Log.w("VCZ", "SCO stop failed: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
-    // ------------------------------------------------------------
-// DESTROY
-// ------------------------------------------------------------
+
+    // --------------------------------------------------------------------
+    // ON DESTROY
+    // --------------------------------------------------------------------
     override fun onDestroy() {
         super.onDestroy()
-        Log.d("VCZ", "onDestroy()")
-
         recorder?.stop()
         tts?.shutdown()
         model?.close()
