@@ -7,7 +7,6 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Bundle
 import android.widget.Button
-import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -16,89 +15,129 @@ import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var tvStatus: TextView
-    private lateinit var btnRecord: Button
-
-    private var selectedWord = "Base"
-
+    private lateinit var waveform: WaveformView
+    private var selectedWord: String? = null
     private val sampleRate = 16000
-    private val bufferSize = AudioRecord.getMinBufferSize(
-        sampleRate,
-        AudioFormat.CHANNEL_IN_MONO,
-        AudioFormat.ENCODING_PCM_16BIT
-    )
+    private val wordButtons = mutableListOf<Button>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        tvStatus = findViewById(R.id.tvStatus)
-        btnRecord = findViewById(R.id.btnRecord)
+        waveform = findViewById(R.id.waveformView)
 
-        requestPermissions()
+        requestMicPermission()
+        setupWordButtons()
+        setupRecordButton()
+    }
 
-        findViewById<Button>(R.id.btnBase).setOnClickListener { selectedWord = "Base" }
-        findViewById<Button>(R.id.btnOK).setOnClickListener { selectedWord = "OK" }
-        findViewById<Button>(R.id.btnHato).setOnClickListener { selectedWord = "Hato" }
-        findViewById<Button>(R.id.btnKhana).setOnClickListener { selectedWord = "Khana" }
-        findViewById<Button>(R.id.btnJao).setOnClickListener { selectedWord = "Jao" }
-        findViewById<Button>(R.id.btnNahi).setOnClickListener { selectedWord = "Nahi" }
-        findViewById<Button>(R.id.btnHaan).setOnClickListener { selectedWord = "Haan" }
+    private fun requestMicPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                1
+            )
+        }
+    }
+
+    private fun setupWordButtons() {
+        val map = mapOf(
+            R.id.btnBase to "base",
+            R.id.btnOK to "ok",
+            R.id.btnHato to "hato",
+            R.id.btnKhana to "khana",
+            R.id.btnJao to "jao",
+            R.id.btnNahi to "nahi",
+            R.id.btnHaan to "haan",
+            R.id.btnSaat to "saat",
+            R.id.btnSaatvik to "saatvik",
+            R.id.btnPani to "pani"
+        )
+
+        map.forEach { (id, word) ->
+            val btn = findViewById<Button>(id)
+            wordButtons.add(btn)
+            btn.setOnClickListener {
+                selectedWord = word
+                highlight(btn)
+            }
+        }
+    }
+
+    private fun highlight(active: Button) {
+        wordButtons.forEach { it.setBackgroundColor(0xFF444444.toInt()) }
+        active.setBackgroundColor(0xFF00AA00.toInt())
+    }
+
+    private fun setupRecordButton() {
+        val btnRecord = findViewById<Button>(R.id.btnRecord)
 
         btnRecord.setOnClickListener {
-            tvStatus.text = "Recording $selectedWord ..."
-            Thread { recordWord() }.start()
+            val word = selectedWord ?: return@setOnClickListener
+            Thread {
+                val pcm = recordOneSecond()
+                saveWav(word, pcm)
+            }.start()
         }
     }
 
-    private fun requestPermissions() {
-        val needed = arrayOf(Manifest.permission.RECORD_AUDIO)
-
-        val missing = needed.any {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-
-        if (missing) {
-            ActivityCompat.requestPermissions(this, needed, 101)
-        }
-    }
-
-    private fun recordWord() {
+    private fun recordOneSecond(): ByteArray {
+        val bufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
 
         val recorder = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.MIC,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
             bufferSize
         )
 
-        val pcmBytes = ByteArray(sampleRate * 2 * 2) // 2 sec
+        val shortBuffer = ShortArray(1024)
+        val totalSamples = sampleRate // 1 second
+        val pcmOut = ByteArray(totalSamples * 2)
+
         recorder.startRecording()
-        recorder.read(pcmBytes, 0, pcmBytes.size)
+
+        var written = 0
+        while (written < totalSamples) {
+            val read = recorder.read(shortBuffer, 0, shortBuffer.size)
+            for (i in 0 until read) {
+                if (written >= totalSamples) break
+                val s = shortBuffer[i]
+
+                waveform.update(s)
+
+                pcmOut[written * 2] = (s.toInt() and 0xFF).toByte()
+                pcmOut[written * 2 + 1] = ((s.toInt() shr 8) and 0xFF).toByte()
+
+                written++
+            }
+        }
+
         recorder.stop()
         recorder.release()
-
-        saveToFile(pcmBytes)
+        return pcmOut
     }
 
-    private fun saveToFile(pcmData: ByteArray) {
+    private fun saveWav(word: String, pcm: ByteArray) {
+        val baseDir = File(getExternalFilesDir(null), "dataset/$word")
+        if (!baseDir.exists()) baseDir.mkdirs()
 
-        val folder = File(getExternalFilesDir(null), selectedWord)
-        folder.mkdirs()
+        val index = baseDir.listFiles()?.size ?: 0
+        val file = File(baseDir, "${word}_${index}.wav")
 
-        val index = folder.listFiles()?.size ?: 0
-        val file = File(folder, "${selectedWord}_${index}.wav")
+        val header = WavWriter().makeWavHeader(pcm.size.toLong(), sampleRate)
 
-        val header = WavWriter().makeWavHeader(pcmData.size.toLong(), sampleRate)
-
-        val out = FileOutputStream(file)
-        out.write(header)
-        out.write(pcmData)
-        out.close()
-
-        runOnUiThread {
-            tvStatus.text = "Saved: ${file.absolutePath}"
+        FileOutputStream(file).use {
+            it.write(header)
+            it.write(pcm)
         }
     }
 }
