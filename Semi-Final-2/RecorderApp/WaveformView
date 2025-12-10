@@ -1,0 +1,40 @@
+package com.example.vocalizerec
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.util.AttributeSet
+import android.view.View
+import kotlin.math.abs
+
+class WaveformView(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
+
+    private val paint = Paint().apply {
+        color = 0xFF00FF00.toInt()
+        strokeWidth = 4f
+        isAntiAlias = true
+    }
+
+    private val samples = FloatArray(200)
+
+    fun update(sample: Short) {
+        for (i in 0 until samples.size - 1)
+            samples[i] = samples[i + 1]
+
+        samples[samples.size - 1] = abs(sample.toFloat()) / 32768f
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+
+        val mid = height / 2f
+        val w = width.toFloat()
+
+        for (i in samples.indices) {
+            val x = (i.toFloat() / samples.size) * w
+            val y = samples[i] * (height / 2f)
+            canvas.drawLine(x, mid - y, x, mid + y, paint)
+        }
+    }
+}
