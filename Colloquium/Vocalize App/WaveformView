@@ -1,0 +1,52 @@
+package com.example.vocalize
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.util.AttributeSet
+import android.view.View
+
+class WaveformView @JvmOverloads constructor(
+    context: Context, attrs: AttributeSet? = null
+) : View(context, attrs) {
+    private var samples: FloatArray? = null
+    private val paint = Paint().apply { color = Color.DKGRAY; strokeWidth = 2f }
+
+    fun updateSamples(s: FloatArray) {
+        // downsample or copy to avoid huge allocation on UI thread
+        val cw = width.coerceAtLeast(1)
+        val step = maxOf(1, samplesStep(s.size, cw))
+        val out = FloatArray(s.size / step)
+        var i = 0
+        var j = 0
+        while (i < s.size && j < out.size) {
+            out[j] = s[i]
+            i += step
+            j++
+        }
+        samples = out
+        postInvalidate()
+    }
+
+    private fun samplesStep(size: Int, width: Int): Int {
+        return (size / width).coerceAtLeast(1)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val s = samples ?: return
+        if (s.isEmpty()) return
+        val center = h / 2f
+        val stepX = w / s.size
+        var x = 0f
+        for (i in s.indices) {
+            val v = s[i]
+            val y = center - v * (h / 2f)
+            canvas.drawLine(x, center, x, y, paint)
+            x += stepX
+        }
+    }
+}
