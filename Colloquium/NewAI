@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+train_vocalize_v2_final.py
+
+Production-locked training pipeline for phonetic minimal-pair discrimination.
+Architecture validated for jao/aao, paani/nahi onset detection.
+
+Critical design decisions:
+- ZERO temporal downsampling (frequency-only pooling preserves ~22 time steps)
+- Bidirectional stacked GRUs (no attention, no TFLite SELECT_TF_OPS risk)
+- Conservative augmentation (avoids destroying phonetic cues)
+- Mandatory minimal-pair diagnostics (deployment gate: F1 > 0.85)
+
+Target: Raspberry Pi 4B, TensorFlow 2.13.0, Python 3.11
+"""
+
+import os
+import random
+import argparse
+from pathlib import Path
+import numpy as np
+import soundfile as sf
+import librosa
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import tensorflow as tf
+from tensorflow.keras import layers, models, backend as K
+from tensorflow.keras.utils import Sequence
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
+
+# =====================
+# CONFIG
+# =====================
+SR = 16000
+DURATION = 1.0
+TARGET_LEN = int(SR * DURATION)
+
+N_FFT = 512
+HOP = 160
+WIN = 400
+N_MELS = 64
+
+RMS_TARGET = 0.02
+VAD_ACTIVE_MS = 500
+
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+tf.random.set_seed(RANDOM_SEED)
+
+# Conservative augmentation: preserves phonetic onset cues
+AUG_PROB = {
+    "time_shift": 0.4,
+    "pitch_shift": 0.25,
+    "time_stretch": 0.3,
+    "noise": 0.5,
+    "spec_augment": 0.6,  # Primary regularization
+}
+
+DEFAULT_BATCH = 16
+DEFAULT_EPOCHS = 60
+
+# Minimal pairs to validate (critical for deployment decision)
+MINIMAL_PAIRS = [("jao", "aao"), ("paani", "nahi")]
+DEPLOYMENT_F1_THRESHOLD = 0.85
+
+# =====================
+# HELPERS
+# =====================
+def pad_trim(y, target_len=TARGET_LEN):
+    """Pad or trim to exact length."""
+    if len(y) < target_len:
+        y = np.pad(y, (0, target_len - len(y)))
+    return y[:target_len]
+
+def rms(y):
+    """Root mean square energy."""
+    return np.sqrt(np.mean(y ** 2))
+
+def apply_gain_normalization(y, target=RMS_TARGET):
+    """Normalize RMS to target level."""
+    return y * (target / (rms(y) + 1e-12))
+
+# =====================
+# ENERGY-BASED CENTERING VAD
+# =====================
+def center_active_region(y, sr=SR, active_window_ms=VAD_ACTIVE_MS):
+    """
+    Center the most energetic 500ms window in the 1-second clip.
+    Critical for aligning phonetic onsets across speakers.
+    """
+    y = y.astype(np.float32)
+    y = pad_trim(y)
+
+    frame_len = int(0.025 * sr)
+    hop_len = int(0.010 * sr)
+
+    frames = librosa.util.frame(y, frame_length=frame_len, hop_length=hop_len).T
+    energies = np.mean(frames ** 2, axis=1)
+
+    # Smooth energy contour
+    win = max(1, int(0.050 / 0.010))
+    energies = np.convolve(energies, np.ones(win) / win, mode="same")
+
+    active_frames = max(1, int((active_window_ms / 1000) / (hop_len / sr)))
+    if len(energies) <= active_frames:
+        return y
+
+    # Find max-energy window
+    cumsum = np.cumsum(np.insert(energies, 0, 0))
+    idx = np.argmax(cumsum[active_frames:] - cumsum[:-active_frames])
+
+    center = idx * hop_len + (active_frames * hop_len) // 2
+    start = center - TARGET_LEN // 2
+
+    out = np.zeros_like(y)
+    if start >= 0:
+        length = min(TARGET_LEN - start, TARGET_LEN)
+        out[start:start + length] = y[:length]
+    else:
+        length = min(TARGET_LEN + start, TARGET_LEN)
+        out[:length] = y[-start:-start + length]
+
+    return out if out.sum() > 0 else y
+
+# =====================
+# AUGMENTATION
+# =====================
+def spec_augment(mel, freq_mask_param=8, n_freq_masks=2):
+    """
+    SpecAugment: frequency masking only (preserves temporal structure).
+    Safer than time-stretch for phonetic discrimination.
+    """
+    mel = mel.copy()
+    n_mels = mel.shape[0]
+    
+    for _ in range(n_freq_masks):
+        f = np.random.randint(0, freq_mask_param)
+        f0 = np.random.randint(0, n_mels - f)
+        mel[f0:f0 + f, :] = 0
+    
+    return mel
+
+def augment_waveform(y, sr=SR):
+    """
+    Conservative waveform augmentation.
+    Time-stretch range is narrow (0.96-1.04) to avoid destroying onset cues.
+    """
+    # Time shift: preserves phonetics
+    if random.random() < AUG_PROB["time_shift"]:
+        shift = int(random.uniform(-0.12, 0.12) * sr)
+        y = np.roll(y, shift)
+        if shift > 0:
+            y[:shift] = 0
+        else:
+            y[shift:] = 0
+
+    # Pitch shift: minimal (vowel formants only slightly affected)
+    if random.random() < AUG_PROB["pitch_shift"]:
+        try:
+            y = librosa.effects.pitch_shift(y, sr=sr, n_steps=random.uniform(-0.5, 0.5))
+        except Exception:
+            pass
+
+    # Time stretch: CONSERVATIVE range (critical for minimal pairs)
+    if random.random() < AUG_PROB["time_stretch"]:
+        rate = random.uniform(0.96, 1.04)  # NOT 0.92-1.08
+        try:
+            y_stretched = librosa.effects.time_stretch(y, rate=rate)
+            y = pad_trim(y_stretched)
+        except Exception:
+            pass
+
+    # Additive noise: prevents overfitting to clean recordings
+    if random.random() < AUG_PROB["noise"]:
+        y += np.random.normal(0, random.uniform(0.0006, 0.007), len(y))
+
+    return np.clip(pad_trim(y), -1.0, 1.0)
+
+# =====================
+# MEL FEATURE
+# =====================
+def waveform_to_mel(y, apply_spec_aug=False):
+    """
+    Convert waveform to normalized mel-spectrogram.
+    Optional SpecAugment for training.
+    """
+    mel = librosa.feature.melspectrogram(
+        y=y, sr=SR,
+        n_fft=N_FFT, hop_length=HOP, win_length=WIN,
+        n_mels=N_MELS, fmin=20, fmax=SR // 2
+    )
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+    
+    if apply_spec_aug and random.random() < AUG_PROB["spec_augment"]:
+        mel_db = spec_augment(mel_db)
+    
+    # Normalize per-sample
+    mel_norm = (mel_db - mel_db.mean()) / (mel_db.std() + 1e-6)
+    return mel_norm.astype(np.float32)
+
+# =====================
+# DATA GENERATOR
+# =====================
+class AudioSequence(Sequence):
+    """
+    Keras Sequence generator with on-the-fly augmentation.
+    Augmentation only applied during training (not validation).
+    """
+    def __init__(self, items, le, batch, augment):
+        self.items = items
+        self.le = le
+        self.batch = batch
+        self.augment = augment
+
+    def __len__(self):
+        return int(np.ceil(len(self.items) / self.batch))
+
+    def __getitem__(self, idx):
+        batch = self.items[idx * self.batch:(idx + 1) * self.batch]
+        X, y = [], []
+
+        for path, label in batch:
+            wav, _ = librosa.load(path, sr=SR)
+            wav = apply_gain_normalization(center_active_region(wav))
+            
+            if self.augment:
+                wav = augment_waveform(wav)
+            
+            mel = waveform_to_mel(wav, apply_spec_aug=self.augment)
+            X.append(mel[..., np.newaxis])
+            y.append(label)
+
+        return np.stack(X), self.le.transform(y)
+
+# =====================
+# MODEL ARCHITECTURE
+# =====================
+def conv_block(x, filters):
+    """
+    Depthwise separable convolution block.
+    Efficient for mobile/edge deployment.
+    """
+    x = layers.SeparableConv2D(filters, 3, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    return layers.ReLU()(x)
+
+def build_model(input_shape, n_classes):
+    """
+    PRODUCTION-LOCKED ARCHITECTURE
+    
+    Key design:
+    - Frequency-only pooling (2,1) preserves temporal resolution
+    - NO temporal downsampling → ~22 time steps into GRU
+    - Bidirectional stacked GRUs (96→64) for onset discrimination
+    - No attention (avoids TFLite SELECT_TF_OPS)
+    
+    Expected time progression:
+    - Input: 64 mels × ~100 time frames
+    - After pool 1: 32 mels × ~100 frames
+    - After pool 2: 16 mels × ~100 frames
+    - After reshape: ~100 time steps × 2048 features
+    - Into GRU: sufficient resolution for <50ms onset detection
+    """
+    inp = layers.Input(shape=input_shape, name="mel_input")
+
+    # Initial conv
+    x = layers.Conv2D(16, 3, padding="same", use_bias=False)(inp)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+
+    # Block 1: frequency reduction only
+    x = conv_block(x, 32)
+    x = conv_block(x, 32)
+    x = layers.MaxPool2D((2, 1), name="freq_pool_1")(x)  # 64→32 mels, time intact
+
+    # Block 2: frequency reduction only
+    x = conv_block(x, 64)
+    x = conv_block(x, 64)
+    x = layers.MaxPool2D((2, 1), name="freq_pool_2")(x)  # 32→16 mels, time intact
+
+    # Block 3: NO pooling (preserves temporal detail)
+    x = conv_block(x, 128)
+
+    # Reshape for recurrent processing
+    # (batch, freq, time, channels) → (batch, time, freq*channels)
+    x = layers.Permute((2, 1, 3))(x)
+    time_steps, freq, channels = K.int_shape(x)[1:]
+    x = layers.Reshape((time_steps, freq * channels))(x)
+
+    # Bidirectional GRU stack: temporal modeling for onset detection
+    x = layers.Bidirectional(
+        layers.GRU(96, return_sequences=True),
+        name="bigru_1"
+    )(x)
+    
+    x = layers.Bidirectional(
+        layers.GRU(64, return_sequences=False),
+        name="bigru_2"
+    )(x)
+
+    # Classification head
+    x = layers.Dense(128, activation="relu")(x)
+    x = layers.Dropout(0.3)(x)
+    out = layers.Dense(n_classes, activation="softmax", name="output")(x)
+
+    return models.Model(inp, out, name="vocalize_v2")
+
+# =====================
+# EVALUATION & DIAGNOSTICS
+# =====================
+def evaluate_minimal_pairs(model, val_gen, le, pairs=MINIMAL_PAIRS):
+    """
+    MANDATORY: Evaluate phonetic minimal pair discrimination.
+    
+    Deployment gate: if any pair has F1 < 0.85, model is NOT production-ready.
+    """
+    print("\n" + "="*60)
+    print("MINIMAL PAIR ANALYSIS (DEPLOYMENT GATE)")
+    print("="*60)
+    
+    y_true_all = []
+    y_pred_all = []
+    
+    for X_batch, y_batch in val_gen:
+        preds = model.predict(X_batch, verbose=0).argmax(axis=1)
+        y_true_all.extend(y_batch)
+        y_pred_all.extend(preds)
+    
+    y_true_all = np.array(y_true_all)
+    y_pred_all = np.array(y_pred_all)
+    
+    deployment_ready = True
+    
+    for w1, w2 in pairs:
+        try:
+            idx1 = le.transform([w1])[0]
+            idx2 = le.transform([w2])[0]
+        except ValueError:
+            print(f"⚠ Warning: Pair ({w1}, {w2}) not in label set, skipping")
+            continue
+        
+        # Extract predictions for this pair only
+        mask = (y_true_all == idx1) | (y_true_all == idx2)
+        y_true_pair = y_true_all[mask]
+        y_pred_pair = y_pred_all[mask]
+        
+        if len(y_true_pair) == 0:
+            print(f"⚠ Warning: No samples found for pair ({w1}, {w2})")
+            continue
+        
+        # Per-class metrics
+        f1_w1 = f1_score(y_true_pair == idx1, y_pred_pair == idx1)
+        f1_w2 = f1_score(y_true_pair == idx2, y_pred_pair == idx2)
+        acc_pair = (y_true_pair == y_pred_pair).mean()
+        
+        print(f"\n{w1} ↔ {w2}:")
+        print(f"  Accuracy: {acc_pair:.3f}")
+        print(f"  F1 ({w1}): {f1_w1:.3f}")
+        print(f"  F1 ({w2}): {f1_w2:.3f}")
+        
+        # Deployment gate check
+        if f1_w1 < DEPLOYMENT_F1_THRESHOLD or f1_w2 < DEPLOYMENT_F1_THRESHOLD:
+            print(f"  ❌ FAILS deployment threshold (F1 > {DEPLOYMENT_F1_THRESHOLD})")
+            deployment_ready = False
+        else:
+            print(f"  ✅ Passes deployment threshold")
+    
+    print("\n" + "="*60)
+    if deployment_ready:
+        print("✅ MODEL IS DEPLOYMENT-READY")
+    else:
+        print("❌ MODEL NOT READY: Minimal pair F1 below threshold")
+    print("="*60 + "\n")
+    
+    return deployment_ready
+
+def plot_confusion_matrix(y_true, y_pred, labels, save_path):
+    """Generate and save confusion matrix heatmap."""
+    cm = confusion_matrix(y_true, y_pred)
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(
+        cm, annot=True, fmt='d', cmap='Blues',
+        xticklabels=labels, yticklabels=labels
+    )
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    print(f"Confusion matrix saved: {save_path}")
+
+# =====================
+# TRAINING PIPELINE
+# =====================
+def train(dataset_path, output_path):
+    """
+    Full training pipeline with deployment validation.
+    """
+    print("="*60)
+    print("VOCALIZE V2 - PHONETIC MINIMAL-PAIR TRAINER")
+    print("="*60)
+    
+    # Load dataset
+    items = []
+    for class_name in os.listdir(dataset_path):
+        class_dir = os.path.join(dataset_path, class_name)
+        if not os.path.isdir(class_dir):
+            continue
+        for filename in os.listdir(class_dir):
+            if filename.endswith(".wav"):
+                items.append((os.path.join(class_dir, filename), class_name))
+    
+    print(f"\nDataset: {len(items)} samples")
+    
+    # Encode labels
+    le = LabelEncoder()
+    le.fit([label for _, label in items])
+    print(f"Classes: {list(le.classes_)}")
+    
+    # Stratified split (file-level, no leakage)
+    train_items, val_items = train_test_split(
+        items, test_size=0.2,
+        stratify=[label for _, label in items],
+        random_state=RANDOM_SEED
+    )
+    print(f"Train: {len(train_items)} | Val: {len(val_items)}")
+    
+    # Determine input shape
+    sample_wav, _ = librosa.load(train_items[0][0], sr=SR)
+    sample_mel = waveform_to_mel(sample_wav)
+    input_shape = sample_mel.shape + (1,)
+    print(f"Input shape: {input_shape}")
+    
+    # Build model
+    print("\nBuilding model...")
+    model = build_model(input_shape, len(le.classes_))
+    model.summary()
+    
+    # Compile
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+    
+    # Data generators
+    train_gen = AudioSequence(train_items, le, DEFAULT_BATCH, augment=True)
+    val_gen = AudioSequence(val_items, le, DEFAULT_BATCH, augment=False)
+    
+    # Train
+    print("\nTraining...")
+    history = model.fit(
+        train_gen,
+        validation_data=val_gen,
+        epochs=DEFAULT_EPOCHS,
+        callbacks=[
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=8,
+                restore_best_weights=True,
+                verbose=1
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=4,
+                min_lr=1e-6,
+                verbose=1
+            )
+        ],
+        verbose=1
+    )
+    
+    # Create output directory
+    out_dir = Path(output_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save model
+    model.save(out_dir / "final_model.h5")
+    print(f"\nModel saved: {out_dir / 'final_model.h5'}")
+    
+    # Save labels
+    with open(out_dir / "labels.txt", "w") as f:
+        f.write("\n".join(le.classes_))
+    print(f"Labels saved: {out_dir / 'labels.txt'}")
+    
+    # Full validation metrics
+    print("\n" + "="*60)
+    print("FULL VALIDATION METRICS")
+    print("="*60)
+    
+    y_true_all = []
+    y_pred_all = []
+    for X_batch, y_batch in val_gen:
+        preds = model.predict(X_batch, verbose=0).argmax(axis=1)
+        y_true_all.extend(y_batch)
+        y_pred_all.extend(preds)
+    
+    print("\n" + classification_report(
+        y_true_all, y_pred_all,
+        target_names=le.classes_,
+        digits=3
+    ))
+    
+    # Confusion matrix
+    plot_confusion_matrix(
+        y_true_all, y_pred_all,
+        le.classes_,
+        out_dir / "confusion_matrix.png"
+    )
+    
+    # CRITICAL: Minimal pair evaluation
+    deployment_ready = evaluate_minimal_pairs(model, val_gen, le)
+    
+    # TFLite conversion
+    print("\nConverting to TFLite...")
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    tflite_model = converter.convert()
+    
+    tflite_path = out_dir / "model.tflite"
+    tflite_path.write_bytes(tflite_model)
+    print(f"TFLite model saved: {tflite_path}")
+    
+    # Final deployment decision
+    print("\n" + "="*60)
+    if deployment_ready:
+        print("✅ DEPLOYMENT APPROVED")
+        print("Model meets minimal-pair F1 threshold")
+    else:
+        print("❌ DEPLOYMENT BLOCKED")
+        print(f"Retrain or collect more data for minimal pairs: {MINIMAL_PAIRS}")
+    print("="*60)
+
+# =====================
+# CLI
+# =====================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Train Vocalize V2 with phonetic minimal-pair validation"
+    )
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help="Path to dataset directory (class folders with .wav files)"
+    )
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="Output directory for model, labels, and diagnostics"
+    )
+    
+    args = parser.parse_args()
+    
+    train(args.dataset, args.out)
