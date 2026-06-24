@@ -1,495 +1,198 @@
 # Team Vocalize
 
+## Edge-Based Recognition of Dysarthric Speech Using Spatial–Temporal Acoustic Modeling
+
 ### Overview
 
-Team Vocalize investigates whether lightweight deep learning architectures can reliably recognize high-frequency dysarthric utterances under severe data scarcity and deterministic mobile deployment constraints.
+Vocalize is a research-oriented assistive communication system investigating whether lightweight deep learning models can reliably recognize frequently used dysarthric utterances under severe data constraints while remaining deployable entirely on mobile hardware.
 
-The project was motivated by a practical challenge: conventional speech-recognition systems are typically trained on standard speech distributions and often exhibit degraded performance when confronted with dysarthric speech, characterized by atypical articulation patterns, phonetic variability, and reduced speech intelligibility.
+The project was developed in collaboration with pediatric dysarthric speakers and focuses on constrained-vocabulary communication scenarios where conventional speech-recognition systems often struggle due to atypical articulation patterns and limited training data.
 
-Rather than pursuing large-vocabulary speech transcription, Team Vocalize focuses on a constrained communication setting involving frequently used Hindi utterances collected from pediatric dysarthric speakers. The objective is to determine whether a computationally efficient Convolutional Recurrent Neural Network (CRNN) can learn robust acoustic representations suitable for real-time on-device inference.
-
----
-
-# Dataset
-
-The dataset consists of custom-collected dysarthric speech recordings from pediatric users.
-
-Target utterance classes:
-
-```text
-BGN
-Haa
-Hato
-Jao
-Khana
-Nahi
-Ok
-Paani
-Saat
-Saatvik
-```
-
-This yields a closed-set classification problem involving ten high-frequency communication tokens.
-
-Unlike benchmark corpora, the dataset captures real-world variability associated with pediatric dysarthric speech production.
+Unlike cloud-based speech systems, Team Vocalize performs inference locally using TensorFlow Lite, enabling low-latency, offline operation.
 
 ---
 
-# Digital Signal Processing Pipeline
+## Motivation
 
-## Audio Standardization
+Dysarthria is a motor speech disorder that can significantly reduce speech intelligibility.
 
-All recordings are converted to a fixed representation:
+Most commercial ASR systems are trained on standard speech distributions and often exhibit degraded performance when applied to dysarthric speech.
 
-| Parameter        | Value     |
-| ---------------- | --------- |
-| Sample Rate      | 16,000 Hz |
-| Clip Duration    | 1.0 s     |
-| Samples per Clip | 16,000    |
-
-```python
-SR = 16000
-DURATION = 1.0
-TARGET_LEN = 16000
-```
+This project investigates whether targeted preprocessing, acoustic feature extraction, and efficient neural architectures can improve accessibility for users with atypical speech patterns.
 
 ---
 
-## Energy-Based Voice Activity Centering
+## Dataset
 
-To reduce temporal variability, the system performs Voice Activity Detection (VAD) using frame-level energy estimation.
+A custom dataset was collected from pediatric dysarthric speakers.
 
-Frame parameters:
+Characteristics:
 
-| Parameter     | Value  |
-| ------------- | ------ |
-| Frame Length  | 25 ms  |
-| Hop Length    | 10 ms  |
-| Active Window | 400 ms |
+- Custom-recorded speech corpus
+- High-frequency communication utterances
+- Hindi-dominant vocabulary
+- Real-world recording conditions
+- Severe dataset scarcity
 
-Frame energy is computed as:
+Target classes:
 
-[
-E_i = \frac{1}{N}\sum_{n=1}^{N} x_i[n]^2
-]
+- BGN
+- Haa
+- Hato
+- Jao
+- Khana
+- Nahi
+- Ok
+- Paani
+- Saat
+- Saatvik
 
-where:
-
-* (x_i[n]) is the (n)-th sample of frame (i)
-* (N) is the frame length
-
-The highest-energy contiguous segment is identified and centered within the one-second recording window.
-
-This procedure improves alignment consistency while preserving speaker-specific articulation characteristics.
-
----
-
-# Mel-Spectrogram Feature Extraction
-
-The system transforms waveforms into two-dimensional time-frequency representations.
-
-## Short-Time Fourier Transform (STFT)
-
-Given a discrete signal (x[n]), the STFT is defined as:
-
-[
-X(m,k)=\sum_{n=-\infty}^{\infty}
-x[n],w[n-mH],
-e^{-j2\pi kn/N}
-]
-
-where:
-
-* (w[n]) is the analysis window
-* (H) is the hop length
-* (N) is the FFT size
+The constrained vocabulary was intentionally selected to maximize practical communication utility under limited-data conditions.
 
 ---
 
-## Spectrogram Parameters
+## Signal Processing Pipeline
 
-| Parameter         | Value |
-| ----------------- | ----- |
-| FFT Size          | 512   |
-| Window Length     | 400   |
-| Hop Length        | 160   |
-| Mel Bands         | 64    |
-| Minimum Frequency | 20 Hz |
-| Maximum Frequency | 8 kHz |
-
-```python
-N_FFT = 512
-WIN = 400
-HOP = 160
-N_MELS = 64
-```
-
----
-
-## Mel Scale Transformation
-
-Human auditory perception is nonlinear with respect to frequency.
-
-The Mel transformation is:
-
-[
-m = 2595\log_{10}\left(1+\frac{f}{700}\right)
-]
-
-where:
-
-* (f) is frequency in Hertz
-* (m) is frequency on the Mel scale
-
-After Mel filtering, power values are converted to decibel space and normalized:
-
-[
-S_{dB}=10\log_{10}(S)
-]
-
-followed by per-sample z-score normalization.
-
----
-
-# Neural Network Architecture
-
-The model follows a Convolutional Recurrent Neural Network (CRNN) design.
-
-## Input Representation
-
-```text
-64 Mel Bands
-×
-~101 Time Frames
-×
-1 Channel
-```
-
----
-
-## Convolutional Front-End
-
-The architecture employs depthwise-separable convolutions to minimize computational complexity while retaining representational capacity.
-
-### Block 0
-
-```text
-Conv2D(16)
-```
-
-### Block 1
-
-```text
-SeparableConv2D(32)
-SeparableConv2D(32)
-MaxPooling2D
-```
-
-### Block 2
-
-```text
-SeparableConv2D(64)
-SeparableConv2D(64)
-MaxPooling2D
-```
-
-### Block 3
-
-```text
-SeparableConv2D(128)
-MaxPooling2D
-```
-
----
-
-## Temporal Modeling Layer
-
-Following convolutional feature extraction:
-
-```text
-Permute
+Raw Audio (16 kHz)
 ↓
-Reshape
+Voice Activity Detection
 ↓
-GRU(64)
-```
-
-### GRU Configuration
-
-| Parameter      | Value          |
-| -------------- | -------------- |
-| Units          | 64             |
-| Directionality | Unidirectional |
-| Stacked Layers | 1              |
-
-GRUs were selected instead of LSTMs due to:
-
-* Reduced parameter count
-* Lower memory footprint
-* Fewer gate operations
-* Faster inference on mobile hardware
-
-These properties are particularly advantageous under deterministic edge-computing constraints.
-
----
-
-## Classification Layer
-
-The final dense layer produces class probabilities using Softmax:
-
-[
-P(y_i)=
-\frac{e^{z_i}}
-{\sum_j e^{z_j}}
-]
-
----
-
-# Training Configuration
-
-| Parameter               | Value |
-| ----------------------- | ----- |
-| Optimizer               | Adam  |
-| Learning Rate           | 0.001 |
-| Batch Size              | 16    |
-| Epochs                  | 60    |
-| Early Stopping Patience | 8     |
-| Random Seed             | 42    |
-
----
-
-## Loss Function
-
-The network is trained using sparse categorical cross-entropy.
-
-For a multi-class problem:
-
-[
-\mathcal{L}
-===========
-
--\sum_{i=1}^{C}
-y_i
-\log(\hat y_i)
-]
-
-where:
-
-* (C) is the number of classes
-* (y_i) is the ground-truth label
-* (\hat y_i) is the predicted probability
-
----
-
-# Data Augmentation
-
-To improve robustness under limited-data conditions, augmentation is applied during training.
-
-| Technique      | Probability |
-| -------------- | ----------- |
-| Time Shift     | 0.50        |
-| Pitch Shift    | 0.40        |
-| Time Stretch   | 0.35        |
-| Gaussian Noise | 0.50        |
-
-Parameter ranges:
-
-```text
-Time Shift: ±0.12 s
-Pitch Shift: ±1 semitone
-Time Stretch: 0.94× – 1.06×
-Noise σ: 0.0006 – 0.007
-```
-
----
-
-# DSP and Training Pipeline
-
-```text
-Raw WAV Audio
-        │
-        ▼
-Resampling (16 kHz)
-        │
-        ▼
-Energy-Based VAD
-        │
-        ▼
+Energy-Based Alignment
+↓
 Gain Normalization
-        │
-        ▼
+↓
 Data Augmentation
-        │
-        ▼
+↓
 Mel Spectrogram Generation
-        │
-        ▼
+↓
 CNN Feature Extraction
-        │
-        ▼
+↓
 GRU Temporal Modeling
-        │
-        ▼
-Softmax Classification
-        │
-        ▼
-Model Training
-        │
-        ▼
-TensorFlow Lite Export
-```
+↓
+Classification
 
 ---
 
-# Edge Inference Pipeline
+## Acoustic Feature Extraction
 
-```text
-Device Microphone
-        │
-        ▼
-Audio Capture
-        │
-        ▼
-Preprocessing
-        │
-        ▼
-Mel Spectrogram Generation
-        │
-        ▼
-TensorFlow Lite Runtime
-        │
-        ▼
-CNN-GRU Inference
-        │
-        ▼
-Softmax Prediction
-        │
-        ▼
-Recognized Utterance
-```
+Audio is transformed into Mel-spectrogram representations using:
+
+- Sample Rate: 16 kHz
+- FFT Size: 512
+- Window Length: 400 samples (25 ms)
+- Hop Length: 160 samples (10 ms)
+- Mel Bands: 64
+
+### Short-Time Fourier Transform
+
+X(m,k)=Σ x[n]w[n−mH]e^(−j2πkn/N)
+
+### Mel Conversion
+
+m = 2595 log10(1 + f/700)
 
 ---
 
-# Repository Structure
+## Model Architecture
 
-## Colloquium/
+The system employs a Convolutional Recurrent Neural Network (CRNN).
 
-Final research and deployment pipeline.
+### Convolutional Front-End
 
-Contains:
+Conv2D(16)
+↓
+SepConv2D(32)
+↓
+SepConv2D(32)
+↓
+MaxPool
+↓
+SepConv2D(64)
+↓
+SepConv2D(64)
+↓
+MaxPool
+↓
+SepConv2D(128)
+↓
+MaxPool
 
-* AIModel.py
-* TensorFlow Lite export
-* Trained models
-* Android application
-* Evaluation outputs
+### Temporal Encoder
 
-Represents the final experimental configuration.
+GRU(64)
 
----
+### Output
 
-## Semi-Final-2/
+Dense + Softmax
 
-Intermediate experimental baseline.
-
-Contains:
-
-* RecorderApp
-* SF2BaseApp
-* Earlier preprocessing pipeline
-* Earlier mobile deployment framework
-
-Used for iterative architecture validation.
-
----
-
-## Vocalize App/
-
-Android deployment layer.
-
-Includes:
-
-* Audio capture
-* Foreground recording service
-* TensorFlow Lite inference
-* UI components
-* Gradle configuration
-
-Provides fully localized on-device inference.
+The use of GRUs instead of LSTMs reduces parameter count, memory consumption, and inference latency, making deployment on mobile hardware more practical.
 
 ---
 
-## outputAI/
+## Training Configuration
 
-Model artifacts:
-
-```text
-best_model.h5
-final_model.h5
-2.13-model.tflite
-labels.txt
-confusion_matrix.png
-```
-
----
-
-# Reproducibility
-
-## Python Environment
-
-```bash
-python -m venv vocalize-env
-
-source vocalize-env/bin/activate
-
-pip install tensorflow
-pip install librosa
-pip install soundfile
-pip install numpy
-pip install matplotlib
-pip install scikit-learn
-pip install tqdm
-```
+| Parameter | Value |
+|------------|---------|
+| Optimizer | Adam |
+| Learning Rate | 0.001 |
+| Batch Size | 16 |
+| Epochs | 60 |
+| Early Stopping | 8 |
+| Seed | 42 |
 
 ---
 
-## Training
+## Mobile Deployment
 
-```bash
-python AIModel.py
-```
+The trained model is exported to TensorFlow Lite and integrated into an Android application.
 
----
+Capabilities:
 
-## Android Build
-
-```bash
-git clone <repository>
-
-cd Vocalize-App
-
-./gradlew assembleDebug
-```
+- Offline inference
+- Low-latency prediction
+- On-device execution
+- No cloud dependency
 
 ---
 
-## TensorFlow Lite Verification
+## Repository Structure
 
-```bash
-adb install app-debug.apk
-```
+### Colloquium/
 
-Deploy the generated TFLite model and verify real-time inference through the Android interface.
+Final research implementation and deployment pipeline.
+
+### Semi-Final-2/
+
+Intermediate experimental baseline used for architecture validation.
+
+### Vocalize App/
+
+Android deployment and inference application.
+
+### outputAI/
+
+Trained models, TensorFlow Lite exports, labels, and evaluation artifacts.
 
 ---
 
-# Research Contributions
+## Limitations
 
-This work demonstrates that:
+This work focuses on constrained-vocabulary communication rather than open-vocabulary speech transcription.
 
-1. Lightweight CRNN architectures can be deployed entirely on-device using TensorFlow Lite.
-2. Spatial–temporal acoustic representations extracted from Mel-spectrograms remain informative under dysarthric speech variability.
-3. Real-time assistive speech recognition can be achieved without cloud inference.
-4. Robust performance is attainable despite severe dataset constraints through targeted preprocessing and augmentation.
+The dataset consists of recordings from a limited number of pediatric dysarthric users and therefore should not be interpreted as a general-purpose dysarthric speech-recognition system.
 
-Rather than treating dysarthric speech as a generic speech-recognition problem, Team Vocalize investigates how constrained-vocabulary communication systems can be optimized for real-world accessibility applications under practical deployment constraints.
+Future work would include:
+
+- Speaker adaptation
+- Larger dysarthric datasets
+- Open-vocabulary recognition
+- Real-time speech reconstruction
+- Personalized language models
+
+---
+
+## Research Significance
+
+Team Vocalize demonstrates that lightweight spatial–temporal acoustic models can be deployed entirely on mobile hardware to support accessibility-oriented communication tasks under severe data and computational constraints.
+
+The project serves as an exploration of practical machine learning systems for assistive technology, combining digital signal processing, edge computing, and applied deep learning in a real-world setting.
