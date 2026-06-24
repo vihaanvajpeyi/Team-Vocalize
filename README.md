@@ -189,8 +189,45 @@ Future work would include:
 
 ---
 
-## Research Significance
+## Significance
 
 Team Vocalize demonstrates that lightweight spatial–temporal acoustic models can be deployed entirely on mobile hardware to support accessibility-oriented communication tasks under severe data and computational constraints.
 
 The project serves as an exploration of practical machine learning systems for assistive technology, combining digital signal processing, edge computing, and applied deep learning in a real-world setting.
+
+---
+
+## License
+
+This repository is released for educational and research purposes.
+
+Copyright (c) 2026 Team Vocalize
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to use, copy, modify, and distribute the Software for non-commercial educational and research purposes, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+2. Any publications, reports, or derivative works based on this project should provide appropriate attribution to the original authors.
+3. Commercial use of the Software requires prior written permission from the authors.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+## Citation
+
+If you use this repository in academic work, please cite:
+
+```text
+Team Vocalize: Edge-Based Recognition of Dysarthric Speech
+Using Spatial–Temporal Acoustic Modeling.
+2026.
+```
+
+---
+
+## Acknowledgements
+
+We would like to thank the participating pediatric dysarthric speakers and their families for their time, patience, and willingness to contribute to this research effort. Their participation made this work possible.
+
+We also acknowledge the open-source machine learning, digital signal processing, and mobile development communities whose tools and libraries enabled the development of this project.
+```
