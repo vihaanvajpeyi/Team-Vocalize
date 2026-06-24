@@ -177,7 +177,7 @@ Trained models, TensorFlow Lite exports, labels, and evaluation artifacts.
 
 This work focuses on constrained-vocabulary communication rather than open-vocabulary speech transcription.
 
-The dataset consists of recordings from a limited number of pediatric dysarthric users and therefore should not be interpreted as a general-purpose dysarthric speech-recognition system.
+The dataset consists of recordings from a limited number of pediatric dysarthric users and therefore, in its current stage, is not fit to serve as a general-purpose dysarthric speech-recognition system.
 
 Future work would include:
 
@@ -191,7 +191,7 @@ Future work would include:
 
 ## Significance
 
-Team Vocalize demonstrates that lightweight spatial–temporal acoustic models can be deployed entirely on mobile hardware to support accessibility-oriented communication tasks under severe data and computational constraints.
+Team Vocalize demonstrates that lightweight spatial–temporal acoustic models can be deployed entirely on mobile hardware to support accessibility-oriented communication tasks under data and computational constraints.
 
 The project serves as an exploration of practical machine learning systems for assistive technology, combining digital signal processing, edge computing, and applied deep learning in a real-world setting.
 
@@ -229,5 +229,7 @@ Using Spatial–Temporal Acoustic Modeling.
 
 We would like to thank the participating pediatric dysarthric speakers and their families for their time, patience, and willingness to contribute to this research effort. Their participation made this work possible.
 
+We are deeply grateful to the Shiv Nadar School Noida Computer Science faculty, for their assistance towards the creation of the project, and providing the necessary resources and facilities for proper execution.
+
 We also acknowledge the open-source machine learning, digital signal processing, and mobile development communities whose tools and libraries enabled the development of this project.
-```
+
