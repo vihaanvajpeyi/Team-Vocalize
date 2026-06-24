@@ -1,7 +1,5 @@
 # Team Vocalize
 
-## Edge-Based Recognition of Dysarthric Speech Using Spatial–Temporal Acoustic Modeling
-
 ### Overview
 
 Vocalize is a research-oriented assistive communication system investigating whether lightweight deep learning models can reliably recognize frequently used dysarthric utterances under severe data constraints while remaining deployable entirely on mobile hardware.
