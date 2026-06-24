@@ -34,7 +34,7 @@ Characteristics:
 
 Target classes:
 
-- BGN
+- BGN (Baseline class, silence)
 - Haa
 - Hato
 - Jao
